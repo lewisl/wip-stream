@@ -1,256 +1,52 @@
 {
-  "name": "gitdoc",
-  "displayName": "GitDoc",
-  "publisher": "vsls-contrib",
-  "icon": "images/icon.png",
-  "description": "Automatically commit/push/pull changes on save, so you can edit a Git repo like a multi-file, versioned document.",
-  "version": "0.2.3",
-  "extensionKind": [
-    "workspace"
-  ],
+  "name": "wipstream",
+  "displayName": "WipStream",
+  "publisher": "lewisl",
+  "description": "A deliberate Git handoff workflow for moving one feature safely between computers.",
+  "version": "0.1.6",
+  "extensionKind": ["workspace"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/lostintangent/gitdoc.git"
+    "url": "https://github.com/lewisl/wip-stream.git"
   },
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": [
-    "Other"
-  ],
-  "keywords": [
-    "commit",
-    "sync",
-    "git",
-    "github-copilot"
-  ],
+  "categories": ["Other"],
+  "keywords": ["git", "sync", "handoff", "workflow"],
   "activationEvents": [
-    "onStartupFinished"
+    "onCommand:wipstream.init",
+    "onCommand:wipstream.resume",
+    "onCommand:wipstream.saveup",
+    "onCommand:wipstream.tofeature",
+    "onCommand:wipstream.tomain"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      {
-        "command": "gitdoc.disable",
-        "title": "Disable",
-        "category": "GitDoc"
-      },
-      {
-        "command": "gitdoc.enable",
-        "title": "Enable",
-        "category": "GitDoc"
-      },
-      {
-        "command": "gitdoc.restoreVersion",
-        "title": "Restore Version"
-      },
-      {
-        "command": "gitdoc.squashVersions",
-        "title": "Squash Version(s) Above"
-      },
-      {
-        "command": "gitdoc.undoVersion",
-        "title": "Undo Version"
-      },
-      {
-        "command": "gitdoc.commit",
-        "title": "Commit",
-        "category": "GitDoc"
-      }
-    ],
-    "configuration": {
-      "title": "GitDoc",
-      "properties": {
-        "gitdoc.autoCommitDelay": {
-          "type": "number",
-          "default": 30000,
-          "markdownDescription": "Controls the delay in ms after which any changes are automatically committed. Only applies when `GitDoc: Enabled` is set to `true`."
-        },
-        "gitdoc.autoPull": {
-          "type": "string",
-          "enum": [
-            "afterDelay",
-            "onCommit",
-            "onPush",
-            "off"
-          ],
-          "default": "onPush",
-          "description": "Specifies whether to automatically pull changes from the current remote."
-        },
-        "gitdoc.autoPullDelay": {
-          "type": "number",
-          "default": 30000,
-          "markdownDescription": "Controls the delay in ms after which any commits are automatically pulled. Only applies when `GitDoc: Auto Pull` is set to `afterDelay`."
-        },
-        "gitdoc.autoPush": {
-          "type": "string",
-          "enum": [
-            "afterDelay",
-            "onCommit",
-            "off"
-          ],
-          "default": "onCommit",
-          "description": "Specifies whether to automatically push your changes to the current remote."
-        },
-        "gitdoc.autoPushDelay": {
-          "type": "number",
-          "default": 30000,
-          "markdownDescription": "Controls the delay in ms after which any commits are automatically pushed. Only applies when `GitDoc: Auto Push` is set to `afterDelay`."
-        },
-        "gitdoc.commitMessageFormat": {
-          "type": "string",
-          "default": "ff",
-          "markdownDescription": "Specifies the date/time format string (using Luxon) to use when generating auto-commit messages. Views [the docs](https://moment.github.io/luxon/#/formatting?id=table-of-tokens) for more details."
-        },
-        "gitdoc.commitValidationLevel": {
-          "type": "string",
-          "enum": [
-            "error",
-            "warning",
-            "none"
-          ],
-          "default": "error",
-          "description": "Specifies whether to validate that a file is free of problems, before attempting to commit changes to it."
-        },
-        "gitdoc.commitOnClose": {
-          "type": "boolean",
-          "default": true,
-          "description": "Specifies whether to automatically commit changes when you close VS Code."
-        },
-        "gitdoc.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Specifies whether to automatically create a commit each time you save a file."
-        },
-        "gitdoc.filePattern": {
-          "type": "string",
-          "default": "**/*",
-          "description": "Specifies a glob that indicates the specific files that should be automatically committed."
-        },
-        "gitdoc.noVerify": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Specifies whether to ignore any configured git hooks. Defaults to `false`."
-        },
-        "gitdoc.pullOnOpen": {
-          "type": "boolean",
-          "default": true,
-          "description": "Specifies whether to automatically pull remote changes when you open a repo."
-        },
-        "gitdoc.pushMode": {
-          "type": "string",
-          "enum": [
-            "forcePush",
-            "forcePushWithLease",
-            "push"
-          ],
-          "default": "forcePush",
-          "description": "Specifies how changes should be pushed after they're committed. This setting only applies when auto-pushing is enabled."
-        },
-        "gitdoc.timeZone": {
-          "type": "string",
-          "default": null,
-          "markdownDescription": "Specifies the timezone (as a [tz database name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)) that commit message dates should be offset to. Defaults to UTC."
-        },
-        "gitdoc.excludeBranches": {
-          "type": "array",
-          "default": [],
-          "description": "Specifies a list of branches that should be excluded from auto-commits."
-        },
-        "gitdoc.ai.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Specifies whether to use AI to generate commit messages. This setting only applies when you have the Copilot extension installed and setup."
-        },
-        "gitdoc.ai.model": {
-          "type": "string",
-          "default": "gpt-4o",
-          "enum": [
-            "gpt-4o",
-            "o1-ga",
-            "o1-mini",
-            "claude-3.5-sonnet",
-            "gemini-1.5-pro"
-          ],
-          "markdownDescription": "Specifies the AI model to use when generating commit messages. This setting only applies when `GitDoc > AI: Enabled` is set to `true`. Defaults to `gpt-4o`."
-        },
-        "gitdoc.ai.useEmojis": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "Specifies whether to prepend AI-generated commit messages with an emoji. This setting only applies when `GitDoc > AI: Enabled` is set to `true`. Defaults to `false`."
-        },
-        "gitdoc.ai.customInstructions": {
-          "type": "string",
-          "default": null,
-          "markdownDescription": "Specifies custom instructions to use when generating commit messages (e.g. use conventional commit syntax, use emojis). This setting only applies when `GitDoc > AI: Enabled` is set to `true`."
-        }
-      }
-    },
-    "menus": {
-      "commandPalette": [
-        {
-          "command": "gitdoc.disable",
-          "when": "gitOpenRepositoryCount != 0 && gitdoc:enabled"
-        },
-        {
-          "command": "gitdoc.enable",
-          "when": "gitOpenRepositoryCount != 0 && !gitdoc:enabled"
-        },
-        {
-          "command": "gitdoc.restoreVersion",
-          "when": "false"
-        },
-        {
-          "command": "gitdoc.squashVersions",
-          "when": "false"
-        },
-        {
-          "command": "gitdoc.undoVersion",
-          "when": "false"
-        },
-        {
-          "command": "gitdoc.commit",
-          "when": "gitdoc:enabled"
-        }
-      ],
-      "timeline/item/context": [
-        {
-          "command": "gitdoc.restoreVersion",
-          "when": "gitdoc:enabled && timelineItem =~ /git:file:commit\\b/",
-          "group": "gitdoc@1"
-        },
-        {
-          "command": "gitdoc.undoVersion",
-          "when": "gitdoc:enabled && timelineItem =~ /git:file:commit\\b/",
-          "group": "gitdoc@2"
-        },
-        {
-          "command": "gitdoc.squashVersions",
-          "when": "gitdoc:enabled && timelineItem =~ /git:file:commit\\b/",
-          "group": "gitdoc@3"
-        }
-      ]
-    }
+      {"command": "wipstream.init", "title": "Initialize Stream", "category": "WipStream"},
+      {"command": "wipstream.resume", "title": "Get Current from Remote", "category": "WipStream"},
+      {"command": "wipstream.saveup", "title": "Save to Remote", "category": "WipStream"},
+      {"command": "wipstream.tofeature", "title": "To Feature", "category": "WipStream"},
+      {"command": "wipstream.tomain", "title": "To Main", "category": "WipStream"}
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "test": "npm run compile && node test/workflow.test.js",
+    "test:remote": "npm run compile && node test/makadoo.acceptance.js",
+    "test:live": "npm run package && node test/live.js",
+    "test:live:verify": "node test/live.js --verify",
+    "test:live:cleanup": "node test/live.js --cleanup",
+    "package": "npm run compile && vsce package --out dist/lewisl.wipstream-$npm_package_version.vsix"
   },
   "devDependencies": {
-    "@types/debounce": "^1.2.0",
-    "@types/luxon": "^2.0.5",
-    "@types/minimatch": "^3.0.3",
     "@types/node": "^18.6.5",
     "@types/vscode": "1.90.0",
-    "tslint": "^5.8.0",
     "typescript": "^4.7.4",
     "vsce": "^2.10.0"
   },
-  "dependencies": {
-    "luxon": "^2.0.2",
-    "minimatch": "^3.0.4",
-    "mobx": "^5.14.2"
-  }
+  "dependencies": {}
 }

@@ -1,7 +1,12 @@
 .vscode/**
+.devcontainer/**
+.serena/**
+images/**
 src/**
 .gitignore
 **/tsconfig.json
 **/tslint.json
 **/*.map
 **/*.ts
+test/**
+docs/**
