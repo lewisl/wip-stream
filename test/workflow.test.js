@@ -56,12 +56,39 @@ async function runLifecycle() {
 
     writeFileSync(path.join(firstClone, "README.md"), "first checkpoint\n");
     writeFileSync(path.join(firstClone, "untracked.txt"), "included in WIP\n");
-    const firstSave = await saveUp(first);
+    let cancelledPrompted = false;
+    await assert.rejects(
+      () => saveUp(first, async () => {
+        cancelledPrompted = true;
+        throw new WorkflowError("CANCELLED", "WipStream command cancelled.");
+      }),
+      (error) => error instanceof WorkflowError && error.code === "CANCELLED"
+    );
+    assert.equal(cancelledPrompted, true, "Save Up requests a message when it will create a checkpoint");
+    assert.equal(await first.hasStagedChanges(), false, "Cancelling before staging leaves the index unchanged");
+    assert.match(await first.statusPorcelain(), /README\.md|untracked\.txt/, "Cancelling leaves work uncommitted");
+
+    const customMessage = "First computer checkpoint";
+    const firstSave = await saveUp(first, async (defaultMessage) => {
+      assert.match(defaultMessage, /^WIP checkpoint \d{4}-\d{2}-\d{2}T/);
+      return customMessage;
+    });
     assert.deepEqual(firstSave, { checkpointCreated: true, published: true });
-    assert.deepEqual(await saveUp(first), { checkpointCreated: false, published: true }, "Save Up is idempotent");
+    assert.equal(git(firstClone, ["log", "-1", "--format=%s", "wip/feature"]), customMessage);
+    let noOpPrompted = false;
+    assert.deepEqual(
+      await saveUp(first, async () => {
+        noOpPrompted = true;
+        return "This message should not be used";
+      }),
+      { checkpointCreated: false, published: true },
+      "Save Up is idempotent"
+    );
+    assert.equal(noOpPrompted, false, "Save Up does not request a message when there is no checkpoint");
     const wipHash = await first.hash("wip/feature");
     assert.equal(await toFeature(first), true);
     assert.equal(await first.hash("feature"), wipHash, "To Feature preserves the WIP commit exactly");
+    assert.equal(git(firstClone, ["log", "-1", "--format=%s", "feature"]), customMessage);
 
     git(fixture, ["clone", remote, secondClone]);
     configureIdentity(secondClone);

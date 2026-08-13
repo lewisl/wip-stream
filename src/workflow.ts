@@ -21,6 +21,8 @@ export interface SyncResult {
   readonly failure?: "offline" | "remote-changed";
 }
 
+type CheckpointMessageProvider = (defaultMessage: string) => Promise<string>;
+
 export type InitializeResult = "created" | "attached" | "current";
 export type ResumeResult = "resumed" | "current" | "completed";
 export type FinishResult = "finished" | "already-finished";
@@ -390,14 +392,20 @@ async function validateSaveUpState(repo: GitRepository, config: StreamConfig): P
   await assertLocalTopology(repo, config);
 }
 
-export async function saveUp(repo: GitRepository): Promise<SyncResult> {
+export async function saveUp(repo: GitRepository, requestCheckpointMessage?: CheckpointMessageProvider): Promise<SyncResult> {
   const config = await getStreamConfig(repo);
   await validateSaveUpState(repo, config);
+
+  let message: string | undefined;
+  if ((await repo.statusPorcelain()).trim()) {
+    const defaultMessage = checkpointMessage();
+    message = requestCheckpointMessage ? await requestCheckpointMessage(defaultMessage) : defaultMessage;
+  }
   await repo.stageAll();
 
   const checkpointCreated = await repo.hasStagedChanges();
   if (checkpointCreated) {
-    await repo.commit(checkpointMessage());
+    await repo.commit(message ?? checkpointMessage());
   }
 
   try {

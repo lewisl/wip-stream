@@ -98,6 +98,21 @@ async function askValue(prompt: string, value: string): Promise<string> {
   return result.trim();
 }
 
+async function promptForCheckpointMessage(defaultMessage: string): Promise<string> {
+  const result = await vscode.window.showInputBox({
+    prompt: "Checkpoint commit message",
+    value: defaultMessage,
+    ignoreFocusOut: true,
+  });
+  if (result === undefined) {
+    throw new WorkflowError("CANCELLED", "WipStream command cancelled.");
+  }
+  if (!result.trim()) {
+    throw new WorkflowError("INVALID_INPUT", "Checkpoint commit messages cannot be blank.");
+  }
+  return result.trim();
+}
+
 async function promptForConfig(repo: GitRepository): Promise<StreamConfigInput> {
   const defaults = await defaultsFor(repo);
   return {
@@ -191,7 +206,7 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     runCommand(output, "Save to Remote", async () => {
       const repo = await selectRepository();
       await saveRepositoryDocuments(repo);
-      showSuccess(output, syncMessage(await saveUp(repo)));
+      showSuccess(output, syncMessage(await saveUp(repo, promptForCheckpointMessage)));
     })
   );
 
@@ -199,7 +214,7 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     runCommand(output, "To Feature", async () => {
       const repo = await selectRepository();
       await saveRepositoryDocuments(repo);
-      const saved = await saveUp(repo);
+      const saved = await saveUp(repo, promptForCheckpointMessage);
       if (!saved.published) {
         throw new WorkflowError("NOT_SYNCED", `${syncMessage(saved)} To Feature requires a successful handoff.`);
       }
