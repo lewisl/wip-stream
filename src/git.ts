@@ -150,6 +150,17 @@ export class GitRepository {
     return this.run(["status", "--porcelain=v1"]);
   }
 
+  public async hasDirtySubmodules(): Promise<boolean> {
+    const result = await this.tryRun([
+      "submodule",
+      "foreach",
+      "--quiet",
+      "--recursive",
+      "test -z \"$(git status --porcelain=v1)\"",
+    ]);
+    return result.exitCode !== 0;
+  }
+
   public async hasConflicts(): Promise<boolean> {
     return (await this.run(["diff", "--name-only", "--diff-filter=U"])).length > 0;
   }

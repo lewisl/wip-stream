@@ -386,6 +386,9 @@ export async function resume(repo: GitRepository): Promise<ResumeResult> {
 
 async function validateSaveUpState(repo: GitRepository, config: StreamConfig): Promise<void> {
   await requireStableRepository(repo, false);
+  if (await repo.hasDirtySubmodules()) {
+    fail("DIRTY_SUBMODULES", "Commit or discard changes inside submodules before using Save to Remote.");
+  }
   if ((await repo.currentBranch()) !== config.wipBranch) {
     fail("WRONG_BRANCH", `Save to Remote requires “${config.wipBranch}” to be checked out. Run WipStream: Get Current from Remote first.`);
   }

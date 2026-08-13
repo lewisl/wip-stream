@@ -2,7 +2,7 @@
 
 ## Done
 
-- Reworked the GitDoc clone into the local-VSIX WipStream extension (`lewisl.wipstream`).
+- Reworked an earlier extension baseline into the local-VSIX WipStream extension (`lewisl.wipstream`).
 - Implemented and tested the five commands: Initialize Stream, Get Current from Remote, Save to Remote, To Feature, and To Main.
 - Added safe two-computer synchronization, completed-stream recovery to `main`, atomic remote transitions, Git-hook support, automated Git workflow tests, and an isolated two-window VS Code live-test harness.
 - Initialize Stream now performs Get Current from Remote automatically for the first session; later sessions begin explicitly with Get Current from Remote.

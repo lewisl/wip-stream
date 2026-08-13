@@ -29,7 +29,7 @@ WipStream is designed for one active editing machine at a time and for one perso
 - A normal, complete Git working clone with a reachable remote (default `origin`).
 - Permission to create, update, and delete the configured temporary branches, and to fast-forward the configured main branch.
 - A remote that supports Git atomic pushes. WipStream validates these pre-requisites during initialization.
-- Git commit hooks are honored. If a hook rejects a checkpoint, it is not committed or pushed.
+- Git commit hooks are honored. If a hook rejects a checkpoint, it is not committed or pushed; Git leaves the changes staged so you can fix the problem and retry.
 
 The default branch names are `origin`, `main`, `feature`, and `wip/feature`. Initialization offers these names and stores the chosen values in that clone’s `.git/config` under `wipstream.*`. Other branches are never touched.
 
@@ -67,7 +67,9 @@ This command commits and saves the current work to the remote:
 4. When content has changed, prompts for a checkpoint commit message prefilled with a timestamped WIP message. Accept the default or replace it; then creates one checkpoint.
 5. Atomically pushes `main`, `feature`, and `wip/feature` to the remote.
 
-It reports whether the checkpoint is synced, already synced, local-only because the network is unavailable, or local-only because the remote changed. Do not move to another machine until it reports a successful sync.
+Files excluded by `.gitignore` and empty directories are not committed. If a submodule has uncommitted changes, commit or discard them within that submodule before saving the parent repository.
+
+It reports whether the checkpoint is synced, whether there were no committable changes, whether work is local-only because the network is unavailable, or whether the remote changed. Do not move to another machine until it reports a successful sync.
 
 ### WipStream: To Feature (`wipstream:tofeature`)
 

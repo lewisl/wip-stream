@@ -6,6 +6,5 @@
     "out": true
   },
   "typescript.tsc.autoDetect": "off",
-  "editor.formatOnSave": true,
-  "gitdoc.enabled": false
+  "editor.formatOnSave": true
 }

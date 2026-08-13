@@ -125,14 +125,16 @@ async function promptForConfig(repo: GitRepository): Promise<StreamConfigInput> 
 
 function syncMessage(result: SyncResult): string {
   if (result.published) {
-    return result.checkpointCreated ? "WIP checkpoint saved and synced." : "Already saved and synced.";
+    return result.checkpointCreated ? "WIP checkpoint saved and synced." : "No committable changes; managed branches are synced.";
   }
   if (result.failure === "offline") {
     return result.checkpointCreated
       ? "WIP checkpoint saved locally but not synced. This machine still has the latest work."
-      : "Nothing new was committed, but pending work could not be synced. This machine may still have the latest work.";
+      : "No committable changes, but pending work could not be synced. This machine may still have the latest work.";
   }
-  return "WIP checkpoint is local only because the remote contains different work. Do not continue on another machine until you recover or publish it.";
+  return result.checkpointCreated
+    ? "WIP checkpoint is local only because the remote contains different work. Do not continue on another machine until you recover or publish it."
+    : "No committable changes, but managed branches are local only because the remote contains different work. Do not continue on another machine until you recover or publish it.";
 }
 
 function showSuccess(output: vscode.OutputChannel, message: string, notification = message): void {

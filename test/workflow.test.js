@@ -85,10 +85,37 @@ async function runLifecycle() {
       "Save Up is idempotent"
     );
     assert.equal(noOpPrompted, false, "Save Up does not request a message when there is no checkpoint");
+
+    const submoduleSource = path.join(fixture, "submodule-source");
+    git(fixture, ["init", submoduleSource]);
+    configureIdentity(submoduleSource);
+    writeFileSync(path.join(submoduleSource, "file.txt"), "initial\n");
+    git(submoduleSource, ["add", "file.txt"]);
+    git(submoduleSource, ["commit", "-m", "Initial submodule commit"]);
+    git(firstClone, ["-c", "protocol.file.allow=always", "submodule", "add", submoduleSource, "module"]);
+    const submoduleCheckpoint = "Add submodule pointer";
+    assert.deepEqual(
+      await saveUp(first, async () => submoduleCheckpoint),
+      { checkpointCreated: true, published: true }
+    );
+    const beforeDirtySubmodule = await first.hash("wip/feature");
+    writeFileSync(path.join(firstClone, "module", "file.txt"), "uncommitted submodule work\n");
+    let dirtySubmodulePrompted = false;
+    await expectWorkflowError(
+      () => saveUp(first, async () => {
+        dirtySubmodulePrompted = true;
+        return "This message should not be used";
+      }),
+      "DIRTY_SUBMODULES"
+    );
+    assert.equal(dirtySubmodulePrompted, false, "Save Up rejects dirty submodules before prompting");
+    assert.equal(await first.hash("wip/feature"), beforeDirtySubmodule, "dirty submodules do not create a parent checkpoint");
+    git(path.join(firstClone, "module"), ["restore", "file.txt"]);
+
     const wipHash = await first.hash("wip/feature");
     assert.equal(await toFeature(first), true);
     assert.equal(await first.hash("feature"), wipHash, "To Feature preserves the WIP commit exactly");
-    assert.equal(git(firstClone, ["log", "-1", "--format=%s", "feature"]), customMessage);
+    assert.equal(git(firstClone, ["log", "-1", "--format=%s", "feature"]), submoduleCheckpoint);
 
     git(fixture, ["clone", remote, secondClone]);
     configureIdentity(secondClone);
