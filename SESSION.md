@@ -1,14 +1,13 @@
 # WipStream session notes
 
-## Done
+## Current state
 
-- Reworked an earlier extension baseline into the local-VSIX WipStream extension (`lewisl.wipstream`).
-- Implemented and tested the five commands: Initialize Stream, Get Current from Remote, Save to Remote, To Feature, and To Main.
-- Added safe two-computer synchronization, completed-stream recovery to `main`, atomic remote transitions, Git-hook support, automated Git workflow tests, and an isolated two-window VS Code live-test harness.
-- Initialize Stream now performs Get Current from Remote automatically for the first session; later sessions begin explicitly with Get Current from Remote.
-- Latest packaged build: `dist/lewisl.wipstream-0.1.6.vsix`. It has not been installed into the VS Code instance hosting Codex.
+- The five WipStream commands are implemented: Initialize Stream, Get Current from Remote, Save to Remote, To Feature, and To Main.
+- Save to Remote stages all committable changes, including untracked files, and prompts for an optional custom checkpoint message only when it will create a commit. To Feature uses that same save step; To Main creates no commit.
+- Save to Remote rejects unresolved Git operations or conflicts and dirty submodules. A rejected Git commit hook leaves the staged changes available to fix and retry.
+- The extension uses explicit commands only; it has no background auto-commit, pull, or push behavior.
+- Automated workflow tests pass, including two-computer synchronization, untracked files, cancelled prompts, hook rejection, and dirty submodules.
 
-## Next steps
+## Only remaining task
 
-1. Prompt for a checkpoint commit message, prefilled with the existing automatic timestamped WIP message so the user can accept or replace it. Use this for Save to Remote and for the save performed by To Feature. To Feature itself only advances a ref and therefore does not create a separate commit message.
-2. Run further live VS Code and two-computer workflow testing, including the new commit-message behavior.
+1. Run the isolated two-window end-to-end live test for the current changes.

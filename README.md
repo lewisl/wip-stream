@@ -18,7 +18,7 @@ main ───── feature ───── wip/feature
   
 `Save to Remote` creates a commit on the wip/feature branch and pushes it to remote so that you can access it from other computers where you also work on the repo. Once `Save to Remote` reports success, the remote is the authoritative state that another computer may download using the current from.
 
-`To Feature` extends the `feature` branch to the latest `wip/feature` commit. No squash, rebase, merge, or force-push is necessary. If some WIP commits should be hidden, squash them manually before you run the `To Feature` command.
+`To Feature` extends the `feature` branch to the latest `wip/feature` commit. No squash, rebase, merge, or force-push is necessary. If some WIP commits should be hidden, squash them manually before you run the `To Feature` command. WipStream recognizes a rewritten WIP history and asks before replacing the remote WIP checkpoints; it refuses if another machine has changed the stream since this machine’s last successful handoff.
 
 `Get Current from Remote` is the first command you must run on another computer before you edit anything in the project. This command pulls all changes on all of the branches to this computer.  Do not edit anything in the project until you do this first!
 
@@ -120,12 +120,12 @@ Building a `.vsix` with npm is only needed when developing or testing WipStream 
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.1.6.vsix --force
+code --install-extension dist/lewisl.wipstream-0.1.7.vsix --force
 ```
 
 Increment `version` in `package.json` for meaningful local test builds so installed versions are obvious.
 
-`npm test` creates disposable local bare remotes and clones; it never contacts a network service. The optional `npm run test:remote` uses `/Users/lewislevin/code/makadoo` only when `WIPSTREAM_REMOTE_ACCEPTANCE=1` is set. It creates uniquely named temporary remote branches, never changes Makadoo’s real `main`, and preserves the unique branches after a failure for diagnosis.
+`npm test` creates disposable local bare remotes and clones; it never contacts a network service.
 
 For a manual live-extension test that never restarts or changes the VS Code instance running Codex, run:
 

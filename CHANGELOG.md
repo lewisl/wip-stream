@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7
+
+- Save to Remote and To Feature now support intentionally condensed local WIP history. WipStream asks before replacing the remote WIP checkpoints and refuses that replacement if another machine has changed the stream since the last successful handoff.
+- Removed the personal Makadoo remote-acceptance test. The published repository now uses only self-contained disposable fixtures.
+
 ## 0.1.6
 
 - Initialize Stream now safely gets current from the remote and starts the first editing session automatically.

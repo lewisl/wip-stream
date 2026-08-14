@@ -12,6 +12,7 @@ import {
   SyncResult,
   toFeature,
   toMain,
+  WipRewriteConfirmation,
   WorkflowError,
 } from "./workflow";
 
@@ -125,6 +126,9 @@ async function promptForConfig(repo: GitRepository): Promise<StreamConfigInput> 
 
 function syncMessage(result: SyncResult): string {
   if (result.published) {
+    if (result.wipHistoryRewritten) {
+      return result.checkpointCreated ? "Rewritten WIP history saved and synced." : "Rewritten WIP history synced.";
+    }
     return result.checkpointCreated ? "WIP checkpoint saved and synced." : "No committable changes; managed branches are synced.";
   }
   if (result.failure === "offline") {
@@ -135,6 +139,14 @@ function syncMessage(result: SyncResult): string {
   return result.checkpointCreated
     ? "WIP checkpoint is local only because the remote contains different work. Do not continue on another machine until you recover or publish it."
     : "No committable changes, but managed branches are local only because the remote contains different work. Do not continue on another machine until you recover or publish it.";
+}
+
+async function confirmWipRewrite({ unverifiedBase }: WipRewriteConfirmation): Promise<boolean> {
+  const message = unverifiedBase
+    ? "WipStream cannot verify the earlier handoff because this stream was initialized with an older version. Replace the remote WIP checkpoints only if no other machine has worked on this stream since you last saved."
+    : "WipStream detected that unaccepted WIP checkpoints were rewritten locally. Replace the remote WIP checkpoints with this condensed history?";
+  const choice = await vscode.window.showWarningMessage(message, { modal: true }, "Replace Remote WIP");
+  return choice === "Replace Remote WIP";
 }
 
 function showSuccess(output: vscode.OutputChannel, message: string, notification = message): void {
@@ -208,7 +220,7 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     runCommand(output, "Save to Remote", async () => {
       const repo = await selectRepository();
       await saveRepositoryDocuments(repo);
-      showSuccess(output, syncMessage(await saveUp(repo, promptForCheckpointMessage)));
+      showSuccess(output, syncMessage(await saveUp(repo, promptForCheckpointMessage, confirmWipRewrite)));
     })
   );
 
@@ -216,7 +228,7 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     runCommand(output, "To Feature", async () => {
       const repo = await selectRepository();
       await saveRepositoryDocuments(repo);
-      const saved = await saveUp(repo, promptForCheckpointMessage);
+      const saved = await saveUp(repo, promptForCheckpointMessage, confirmWipRewrite);
       if (!saved.published) {
         throw new WorkflowError("NOT_SYNCED", `${syncMessage(saved)} To Feature requires a successful handoff.`);
       }

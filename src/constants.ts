@@ -8,4 +8,5 @@ export const CONFIG_KEYS = {
   mainBranch: "wipstream.mainBranch",
   featureBranch: "wipstream.featureBranch",
   wipBranch: "wipstream.wipBranch",
+  lastKnownRemoteWip: "wipstream.lastKnownRemoteWip",
 } as const;

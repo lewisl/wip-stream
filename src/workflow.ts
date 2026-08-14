@@ -18,10 +18,15 @@ export interface StreamConfigInput {
 export interface SyncResult {
   readonly checkpointCreated: boolean;
   readonly published: boolean;
+  readonly wipHistoryRewritten?: boolean;
   readonly failure?: "offline" | "remote-changed";
 }
 
 type CheckpointMessageProvider = (defaultMessage: string) => Promise<string>;
+export interface WipRewriteConfirmation {
+  readonly unverifiedBase: boolean;
+}
+type WipRewriteConfirmationProvider = (confirmation: WipRewriteConfirmation) => Promise<boolean>;
 
 export type InitializeResult = "created" | "attached" | "current";
 export type ResumeResult = "resumed" | "current" | "completed";
@@ -52,6 +57,11 @@ interface ManagedBranch {
 interface BranchState extends ManagedBranch {
   readonly exists: boolean;
   readonly relation?: BranchRelation;
+}
+
+interface WipRewritePlan {
+  readonly expectedRemoteWip: string;
+  readonly unverifiedBase: boolean;
 }
 
 function fail(code: string, message: string): never {
@@ -238,6 +248,33 @@ async function assertLocalTopology(repo: GitRepository, config: StreamConfig): P
   await assertTopology(repo, config.mainBranch, config.featureBranch, config.wipBranch);
 }
 
+async function rememberRemoteWip(repo: GitRepository, config: StreamConfig): Promise<void> {
+  await repo.setConfig(CONFIG_KEYS.lastKnownRemoteWip, await repo.hash(repo.remoteRef(config.remote, config.wipBranch)));
+}
+
+async function prepareWipRewrite(repo: GitRepository, config: StreamConfig): Promise<WipRewritePlan | undefined> {
+  const remoteWip = repo.remoteRef(config.remote, config.wipBranch);
+  if ((await repo.relation(repo.localRef(config.wipBranch), remoteWip)) !== "diverged") {
+    return undefined;
+  }
+
+  await repo.fetch(config.remote);
+  if (!(await repo.refExists(remoteWip))) {
+    fail("PARTIAL_REMOTE_STREAM", "The remote WipStream is incomplete. Inspect and repair it manually.");
+  }
+
+  const remoteWipHash = await repo.hash(remoteWip);
+  const lastKnownRemoteWip = await repo.getConfig(CONFIG_KEYS.lastKnownRemoteWip);
+  if (lastKnownRemoteWip && lastKnownRemoteWip !== remoteWipHash) {
+    fail(
+      "REMOTE_WIP_CHANGED",
+      "The remote WIP stream changed after this machine’s last successful handoff. Do not replace it; recover the local rewrite before continuing."
+    );
+  }
+
+  return { expectedRemoteWip: remoteWipHash, unverifiedBase: !lastKnownRemoteWip };
+}
+
 export async function initialize(repo: GitRepository, input: StreamConfigInput = {}): Promise<InitializeResult> {
   await requireStableRepository(repo, true);
   const config = await resolveConfig(repo, input);
@@ -381,6 +418,7 @@ export async function resume(repo: GitRepository): Promise<ResumeResult> {
   await assertStatesSafe(states);
   const changed = await applySafeStates(repo, states, true);
   await repo.switch(config.wipBranch);
+  await rememberRemoteWip(repo, config);
   return changed ? "resumed" : "current";
 }
 
@@ -395,7 +433,11 @@ async function validateSaveUpState(repo: GitRepository, config: StreamConfig): P
   await assertLocalTopology(repo, config);
 }
 
-export async function saveUp(repo: GitRepository, requestCheckpointMessage?: CheckpointMessageProvider): Promise<SyncResult> {
+export async function saveUp(
+  repo: GitRepository,
+  requestCheckpointMessage?: CheckpointMessageProvider,
+  confirmWipRewrite?: WipRewriteConfirmationProvider
+): Promise<SyncResult> {
   const config = await getStreamConfig(repo);
   await validateSaveUpState(repo, config);
 
@@ -412,12 +454,24 @@ export async function saveUp(repo: GitRepository, requestCheckpointMessage?: Che
   }
 
   try {
+    const wipRewrite = await prepareWipRewrite(repo, config);
+    if (wipRewrite) {
+      if (!confirmWipRewrite) {
+        fail("WIP_REWRITE_CONFIRMATION_REQUIRED", "WipStream needs confirmation before replacing rewritten remote WIP checkpoints.");
+      }
+      if (!(await confirmWipRewrite({ unverifiedBase: wipRewrite.unverifiedBase }))) {
+        fail("CANCELLED", "WipStream did not replace the remote WIP checkpoints.");
+      }
+    }
     await repo.pushAtomic(config.remote, [
       refspec(config.mainBranch),
       refspec(config.featureBranch),
       refspec(config.wipBranch),
-    ]);
-    return { checkpointCreated, published: true };
+    ], wipRewrite ? { [config.wipBranch]: wipRewrite.expectedRemoteWip } : {});
+    await rememberRemoteWip(repo, config);
+    return wipRewrite
+      ? { checkpointCreated, published: true, wipHistoryRewritten: true }
+      : { checkpointCreated, published: true };
   } catch (error) {
     if (error instanceof GitError) {
       return {

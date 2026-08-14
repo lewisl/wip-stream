@@ -159,7 +159,81 @@ async function runLifecycle() {
   }
 }
 
-runLifecycle()
+async function runWipRewriteLifecycle() {
+  const fixture = mkdtempSync(path.join(os.tmpdir(), "wipstream-rewrite-test-"));
+  const remote = path.join(fixture, "remote.git");
+  const seed = path.join(fixture, "seed");
+  const firstClone = path.join(fixture, "first");
+  const secondClone = path.join(fixture, "second");
+
+  try {
+    git(fixture, ["init", "--bare", remote]);
+    git(fixture, ["init", seed]);
+    configureIdentity(seed);
+    writeFileSync(path.join(seed, "README.md"), "seed\n");
+    git(seed, ["add", "README.md"]);
+    git(seed, ["commit", "-m", "Initial commit"]);
+    git(seed, ["branch", "-M", "main"]);
+    git(seed, ["remote", "add", "origin", remote]);
+    git(seed, ["push", "-u", "origin", "main"]);
+    git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    git(fixture, ["clone", remote, firstClone]);
+    configureIdentity(firstClone);
+    const first = await GitRepository.open(firstClone);
+    await initialize(first);
+
+    writeFileSync(path.join(firstClone, "first.txt"), "first checkpoint\n");
+    await saveUp(first);
+    writeFileSync(path.join(firstClone, "second.txt"), "second checkpoint\n");
+    await saveUp(first);
+
+    git(firstClone, ["reset", "--soft", "HEAD~2"]);
+    git(firstClone, ["commit", "-m", "Condensed WIP checkpoint"]);
+    let rewritePrompted = false;
+    const rewritten = await saveUp(first, undefined, async ({ unverifiedBase }) => {
+      rewritePrompted = true;
+      assert.equal(unverifiedBase, false, "a current WipStream handoff records a rewrite lease");
+      return true;
+    });
+    assert.equal(rewritePrompted, true, "rewriting remote WIP checkpoints requires confirmation");
+    assert.deepEqual(rewritten, { checkpointCreated: false, published: true, wipHistoryRewritten: true });
+    assert.equal(
+      await first.hash("wip/feature"),
+      await first.hash(first.remoteRef("origin", "wip/feature")),
+      "the confirmed condensed WIP history is published"
+    );
+    assert.equal(await toFeature(first), true, "To Feature accepts the condensed WIP history");
+
+    writeFileSync(path.join(firstClone, "follow-up.txt"), "first machine follow-up\n");
+    await saveUp(first);
+
+    git(fixture, ["clone", remote, secondClone]);
+    configureIdentity(secondClone);
+    const second = await GitRepository.open(secondClone);
+    await initialize(second);
+    writeFileSync(path.join(secondClone, "second-machine.txt"), "second machine handoff\n");
+    await saveUp(second);
+
+    git(firstClone, ["reset", "--soft", "HEAD~1"]);
+    git(firstClone, ["commit", "-m", "Rewritten follow-up"]);
+    let staleRewritePrompted = false;
+    await expectWorkflowError(
+      () => saveUp(first, undefined, async () => {
+        staleRewritePrompted = true;
+        return true;
+      }),
+      "REMOTE_WIP_CHANGED"
+    );
+    assert.equal(staleRewritePrompted, false, "WipStream never offers to replace a newer remote handoff");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+}
+
+Promise.resolve()
+  .then(runLifecycle)
+  .then(runWipRewriteLifecycle)
   .then(() => console.log("WipStream workflow integration tests passed."))
   .catch((error) => {
     console.error(error.stack || error);

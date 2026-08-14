@@ -3,7 +3,7 @@
   "displayName": "WipStream",
   "publisher": "lewisl",
   "description": "A deliberate Git handoff workflow for moving one feature safely between computers.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "extensionKind": ["workspace"],
   "repository": {
     "type": "git",
@@ -36,7 +36,6 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node test/workflow.test.js",
-    "test:remote": "npm run compile && node test/makadoo.acceptance.js",
     "test:live": "npm run package && node test/live.js",
     "test:live:verify": "node test/live.js --verify",
     "test:live:cleanup": "node test/live.js --cleanup",
