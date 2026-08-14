@@ -2,9 +2,11 @@
   "name": "wipstream",
   "displayName": "WipStream",
   "publisher": "lewisl",
-  "description": "A deliberate Git handoff workflow for moving one feature safely between computers.",
-  "version": "0.1.7",
-  "extensionKind": ["workspace"],
+  "description": "Use git to synchronize feature development across several computers.",
+  "version": "0.1.8",
+  "extensionKind": [
+    "workspace"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/lewisl/wip-stream.git"
@@ -12,8 +14,15 @@
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
-  "keywords": ["git", "sync", "handoff", "workflow"],
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "sync",
+    "synchronize",
+    "development"
+  ],
   "activationEvents": [
     "onCommand:wipstream.init",
     "onCommand:wipstream.resume",
@@ -24,11 +33,53 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      {"command": "wipstream.init", "title": "Initialize Stream", "category": "WipStream"},
-      {"command": "wipstream.resume", "title": "Get Current from Remote", "category": "WipStream"},
-      {"command": "wipstream.saveup", "title": "Save to Remote", "category": "WipStream"},
-      {"command": "wipstream.tofeature", "title": "To Feature", "category": "WipStream"},
-      {"command": "wipstream.tomain", "title": "To Main", "category": "WipStream"}
+      {
+        "command": "wipstream.init",
+        "title": "Initialize Stream",
+        "category": "WipStream"
+      },
+      {
+        "command": "wipstream.resume",
+        "title": "Get Current from Remote",
+        "category": "WipStream"
+      },
+      {
+        "command": "wipstream.saveup",
+        "title": "Save to Remote",
+        "category": "WipStream"
+      },
+      {
+        "command": "wipstream.tofeature",
+        "title": "To Feature",
+        "category": "WipStream"
+      },
+      {
+        "command": "wipstream.tomain",
+        "title": "To Main",
+        "category": "WipStream"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "wipstream.init",
+        "key": "ctrl+w i"
+      },
+      {
+        "command": "wipstream.resume",
+        "key": "ctrl+w g"
+      },
+      {
+        "command": "wipstream.saveup",
+        "key": "ctrl+w s"
+      },
+      {
+        "command": "wipstream.tofeature",
+        "key": "ctrl+w f"
+      },
+      {
+        "command": "wipstream.tomain",
+        "key": "ctrl+w m"
+      }
     ]
   },
   "scripts": {
@@ -47,5 +98,7 @@
     "typescript": "^4.7.4",
     "vsce": "^2.10.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@firecrawl/anydoc-wasm": "^0.1.9"
+  }
 }

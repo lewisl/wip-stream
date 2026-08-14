@@ -83,6 +83,18 @@ Saves VS Code documents, then requires a clean working tree and exactly matching
 
 Fetches and rechecks the remote, fast-forwards `main` to `feature`, then atomically publishes `main` while deleting remote `feature` and `wip/feature`. After the remote succeeds, it deletes the local temporary branches and leaves `main` checked out.
 
+## Keyboard Shortcuts
+
+WipStream commands use a two-step chord: press `Ctrl+W`, release it, then press the command key.
+
+| Command | Key |
+| --- | --- |
+| Initialize Stream | `Ctrl+W`, then `I` |
+| Get Current from Remote | `Ctrl+W`, then `G` |
+| Save to Remote | `Ctrl+W`, then `S` |
+| To Feature | `Ctrl+W`, then `F` |
+| To Main | `Ctrl+W`, then `M` |
+
 ## Recovery
 
 **Get Current from Remote** intentionally refuses unexpected local work instead of guessing how to merge it. Either discard that work deliberately, or preserve it on a rescue branch:
@@ -120,7 +132,7 @@ Building a `.vsix` with npm is only needed when developing or testing WipStream 
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.1.7.vsix --force
+code --install-extension dist/lewisl.wipstream-0.1.8.vsix --force
 ```
 
 Increment `version` in `package.json` for meaningful local test builds so installed versions are obvious.

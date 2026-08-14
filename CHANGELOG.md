@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8
+
+- Added keyboard shortcuts for every WipStream command: use the `Ctrl+W` chord followed by `I`, `G`, `S`, `F`, or `M`.
+
 ## 0.1.7
 
 - Save to Remote and To Feature now support intentionally condensed local WIP history. WipStream asks before replacing the remote WIP checkpoints and refuses that replacement if another machine has changed the stream since the last successful handoff.
