@@ -1,12 +1,5 @@
-import { CONFIG_KEYS, CONFIG_VERSION, REPOSITORY_CONFIG_VERSION } from "./constants";
+import { CONFIG_KEYS, LEGACY_REPOSITORY_CONFIG_VERSION, REPOSITORY_CONFIG_VERSION } from "./constants";
 import { BranchRelation as GitBranchRelation, GitRef, GitRepository } from "./git";
-
-const LEGACY_DEFAULTS = {
-  remote: "origin",
-  mainBranch: "main",
-  featureBranch: "feature",
-  wipBranch: "wip/feature",
-} as const;
 
 export const INTERNAL_REF_PREFIX = "refs/wipstream/";
 
@@ -24,16 +17,6 @@ export interface UninitializedRepositoryConfiguration {
   readonly kind: "uninitialized";
 }
 
-export interface Version1RepositoryConfiguration {
-  readonly kind: "version1";
-  readonly version: typeof CONFIG_VERSION;
-  readonly remote: string;
-  readonly mainBranch: string;
-  readonly featureBranch: string;
-  readonly wipBranch: string;
-  readonly lastKnownRemoteWip?: string;
-}
-
 export interface RepositoryConfiguration {
   readonly kind: "version2";
   readonly version: typeof REPOSITORY_CONFIG_VERSION;
@@ -42,7 +25,6 @@ export interface RepositoryConfiguration {
 
 export type ReadRepositoryConfiguration =
   | UninitializedRepositoryConfiguration
-  | Version1RepositoryConfiguration
   | RepositoryConfiguration;
 
 export type BranchInventoryRelation =
@@ -70,7 +52,7 @@ export interface BranchInventoryEntry {
 }
 
 export interface RepositoryInspection {
-  readonly configuration: Version1RepositoryConfiguration | RepositoryConfiguration;
+  readonly configuration: RepositoryConfiguration;
   readonly remoteDefaultBranch: string;
   readonly branches: readonly BranchInventoryEntry[];
 }
@@ -83,26 +65,16 @@ function branchParentKey(branch: string): string {
   return `branch.${branch}.wipstreamParent`;
 }
 
-async function configOrDefault(repo: GitRepository, key: string, fallback: string): Promise<string> {
-  return (await repo.getConfig(key)) || fallback;
-}
-
 export async function readRepositoryConfiguration(repo: GitRepository): Promise<ReadRepositoryConfiguration> {
   const version = await repo.getConfig(CONFIG_KEYS.version);
   if (!version) {
     return { kind: "uninitialized" };
   }
-  if (version === CONFIG_VERSION) {
-    const lastKnownRemoteWip = await repo.getConfig(CONFIG_KEYS.lastKnownRemoteWip);
-    return {
-      kind: "version1",
-      version: CONFIG_VERSION,
-      remote: await configOrDefault(repo, CONFIG_KEYS.remote, LEGACY_DEFAULTS.remote),
-      mainBranch: await configOrDefault(repo, CONFIG_KEYS.mainBranch, LEGACY_DEFAULTS.mainBranch),
-      featureBranch: await configOrDefault(repo, CONFIG_KEYS.featureBranch, LEGACY_DEFAULTS.featureBranch),
-      wipBranch: await configOrDefault(repo, CONFIG_KEYS.wipBranch, LEGACY_DEFAULTS.wipBranch),
-      ...(lastKnownRemoteWip ? { lastKnownRemoteWip } : {}),
-    };
+  if (version === LEGACY_REPOSITORY_CONFIG_VERSION) {
+    return fail(
+      "LEGACY_VERSION_UNSUPPORTED",
+      "This clone uses WipStream version 1. Install WipStream 0.2.1, run Initialize Repository to migrate it, then reinstall the current version."
+    );
   }
   if (version === REPOSITORY_CONFIG_VERSION) {
     const remote = await repo.getConfig(CONFIG_KEYS.remote);
@@ -270,7 +242,7 @@ export async function inspectRepository(
   previousRemoteTips: ReadonlyMap<string, string> = new Map()
 ): Promise<RepositoryInspection> {
   const configuration = await readRepositoryConfiguration(repo);
-  if (configuration.kind === "uninitialized") {
+  if (configuration.kind !== "version2") {
     return fail("NOT_INITIALIZED", "Initialize this repository before inspecting its WipStream branch model.");
   }
   return {

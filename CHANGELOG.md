@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Removed the version 1 workflow, migration implementation, compatibility
+  commands, and their retired test fixtures after the known repositories were
+  migrated successfully.
+- Retained read-only detection of version 1 configuration with an actionable
+  refusal directing an overlooked clone through version 0.2.1.
+
 ## 0.2.1
 
 - Allow a safely stale version 1 clone to adopt a remote already migrated by

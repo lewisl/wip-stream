@@ -10,10 +10,6 @@ import {
 } from "./repository-model";
 import { withRepositoryCommandLock } from "./repository-safety";
 import {
-  Version1MigrationPreview,
-  migrateVersion1RepositoryUnlocked,
-} from "./migration-workflow";
-import {
   applyLocalRefTransaction,
   beginOperation,
   CheckpointTransition,
@@ -51,7 +47,6 @@ export interface GetFromRemoteResult {
 }
 
 export interface InitializeRepositoryHooks {
-  readonly confirmMigrationPreview?: (preview: Version1MigrationPreview) => Promise<boolean>;
   readonly beforeRemotePush?: () => Promise<void>;
   readonly afterRemotePush?: () => Promise<void>;
 }
@@ -529,13 +524,6 @@ async function initializeRepositoryUnlocked(
 ): Promise<InitializeRepositoryResult> {
   await requireStableInitializeRepository(repo);
   const configuration = await readRepositoryConfiguration(repo);
-  if (configuration.kind === "version1") {
-    return migrateVersion1RepositoryUnlocked(repo, {
-      confirmPreview: hooks.confirmMigrationPreview,
-      beforeRemotePush: hooks.beforeRemotePush,
-      afterRemotePush: hooks.afterRemotePush,
-    });
-  }
   const selectedRemote = requestedRemote?.trim();
   if (requestedRemote !== undefined && !selectedRemote) {
     return fail("INVALID_REMOTE", "Initialize Repository requires a non-empty remote name.");
@@ -618,7 +606,7 @@ async function commitAndSaveUnlocked(
   await requireStableSaveRepository(repo);
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind !== "version2") {
-    return fail("VERSION_2_REQUIRED", "Initialize or migrate this repository before using generalized Commit and Save.");
+    return fail("VERSION_2_REQUIRED", "Run Initialize Repository before using Commit and Save.");
   }
   await repo.ensureRemote(configuration.remote);
   const currentBranch = await repo.currentBranch();
@@ -787,7 +775,7 @@ async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemote
   await requireStableGetRepository(repo);
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind !== "version2") {
-    return fail("VERSION_2_REQUIRED", "Initialize or migrate this repository before using generalized Get from Remote.");
+    return fail("VERSION_2_REQUIRED", "Run Initialize Repository before using Get from Remote.");
   }
   await repo.ensureRemote(configuration.remote);
   const currentBranch = await repo.currentBranch();

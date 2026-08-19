@@ -24,7 +24,6 @@ import {
   startBranch,
   updateFromParent,
 } from "./lifecycle-workflow";
-import { Version1MigrationPreview } from "./migration-workflow";
 import {
   getBranchParent,
   readRepositoryConfiguration,
@@ -195,7 +194,7 @@ async function showError(output: vscode.OutputChannel, error: unknown): Promise<
   const code = errorCode(error);
   output.appendLine(`${new Date().toISOString()}  ERROR${code ? ` code=${code}` : ""}  ${message}`);
   output.show(true);
-  if (code === "CANCELLED" || code === "MIGRATION_CANCELLED") {
+  if (code === "CANCELLED") {
     await vscode.window.showInformationMessage(message);
     return;
   }
@@ -272,27 +271,6 @@ async function runCommand(
   }
 }
 
-async function confirmMigration(
-  output: vscode.OutputChannel,
-  preview: Version1MigrationPreview
-): Promise<boolean> {
-  output.appendLine(
-    `${new Date().toISOString()}  PREVIEW  Migrate Version 1  kind=${preview.kind} remote=${preview.remote}`
-  );
-  output.appendLine(`  checkout: ${preview.checkout.before} -> ${preview.checkout.after}`);
-  for (const update of preview.remoteRefUpdates) {
-    output.appendLine(`  remote ${update.ref}: ${update.expected ?? "absent"} -> ${update.proposed ?? "deleted"}`);
-  }
-  for (const update of preview.localRefUpdates) {
-    output.appendLine(`  local ${update.ref}: ${update.expectedOld ?? "absent"} -> ${update.proposed ?? "deleted"}`);
-  }
-  output.show(true);
-  const message = preview.kind === "active"
-    ? `Preserve every checkpoint by advancing “${preview.featureBranch}” to the current WIP tip, then remove only “${preview.wipBranch}” locally and remotely?`
-    : "The version 1 feature is already completed. Convert this clone to the generalized branch model?";
-  return (await vscode.window.showWarningMessage(message, { modal: true }, "Migrate Repository")) === "Migrate Repository";
-}
-
 async function reportSave(output: vscode.OutputChannel, result: CommitAndSaveResult): Promise<void> {
   appendAdvisories(output, result.advisories);
   if (result.published) {
@@ -366,16 +344,11 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     const requestedRemote = configuration.kind === "uninitialized"
       ? await askValue("Git remote", "origin")
       : undefined;
-    const result = await initializeRepository(repo, requestedRemote, {
-      confirmMigrationPreview: (preview) => confirmMigration(output, preview),
-    });
-    const migration = "migration" in result
-      ? ` migration=${String((result as { readonly migration?: unknown }).migration)}`
-      : "";
+    const result = await initializeRepository(repo, requestedRemote);
     showSuccess(
       output,
       "Initialize Repository",
-      `checkout=${result.checkout}${migration} published=${branchList(result.published)} created=${branchList(result.created)} fastForwarded=${branchList(result.fastForwarded)} deleted=${branchList(result.deleted)}`,
+      `checkout=${result.checkout} published=${branchList(result.published)} created=${branchList(result.created)} fastForwarded=${branchList(result.fastForwarded)} deleted=${branchList(result.deleted)}`,
       result.operationId,
       `Repository initialized; “${result.checkout}” is checked out. Use Start Branch or continue on this branch.`
     );
@@ -523,30 +496,6 @@ export function registerCommands(context: vscode.ExtensionContext): void {
       result.operationId,
       `Condensed ${result.exclusiveCommits} commits on “${result.branch}”.`
     );
-  });
-
-  register("tofeature", "To Feature (Legacy)", async () => {
-    const repo = await selectRepository();
-    const configuration = await readRepositoryConfiguration(repo);
-    const message = configuration.kind === "version1"
-      ? "The accepted/WIP split is removed in version 2. Run Initialize Repository to preview migration; it preserves every WIP checkpoint on the feature branch."
-      : "Version 2 has no separate accepted/WIP branch. Commit and Save publishes the checked-out ordinary branch without rewriting it.";
-    output.appendLine(`${new Date().toISOString()}  LEGACY  To Feature  ${message}`);
-    output.show(true);
-    await vscode.window.showInformationMessage(`WipStream: ${message}`);
-  });
-
-  register("tomain", "To Main (Legacy)", async () => {
-    const repo = await selectRepository();
-    const configuration = await readRepositoryConfiguration(repo);
-    if (configuration.kind !== "version2") {
-      throw new CommandUiError(
-        "VERSION_2_REQUIRED",
-        "Run Initialize Repository to migrate version 1, then use Finish Branch. The legacy command will not migrate implicitly."
-      );
-    }
-    await saveRepositoryDocuments(repo);
-    await runFinish(output, repo);
   });
 
   void refreshCommandContexts();

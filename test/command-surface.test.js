@@ -21,12 +21,12 @@ const contextual = [
   ["wipstream.undo", "wipstream.undoAvailable"],
   ["wipstream.condense", "wipstream.condenseAvailable"],
 ];
-const legacy = ["wipstream.tofeature", "wipstream.tomain"];
+const removedLegacy = ["wipstream.tofeature", "wipstream.tomain"];
 
 const declared = new Map(packageJson.contributes.commands.map(({ command, title }) => [command, title]));
 for (const { id, title } of primary) assert.equal(declared.get(id), title);
 for (const [id] of contextual) assert.ok(declared.has(id), `${id} is declared`);
-for (const id of legacy) assert.ok(declared.has(id), `${id} remains declared for one compatibility release`);
+for (const id of removedLegacy) assert.equal(declared.has(id), false, `${id} is no longer declared`);
 
 assert.deepEqual(
   packageJson.contributes.keybindings,
@@ -36,18 +36,20 @@ assert.deepEqual(
 
 const palette = new Map(packageJson.contributes.menus.commandPalette.map(({ command, when }) => [command, when]));
 for (const [id, when] of contextual) assert.equal(palette.get(id), when, `${id} has contextual visibility`);
-for (const id of legacy) assert.equal(palette.get(id), "false", `${id} is callable but hidden from normal UI`);
+for (const id of removedLegacy) assert.equal(palette.has(id), false, `${id} is absent from the command palette`);
 
-for (const id of [...primary.map(({ id }) => id), ...contextual.map(([id]) => id), ...legacy]) {
+for (const id of [...primary.map(({ id }) => id), ...contextual.map(([id]) => id)]) {
   assert.ok(packageJson.activationEvents.includes(`onCommand:${id}`), `${id} activates the extension`);
   assert.ok(commandsSource.includes(`register("${id.replace("wipstream.", "")}"`), `${id} has a registered handler`);
 }
+for (const id of removedLegacy) {
+  assert.equal(packageJson.activationEvents.includes(`onCommand:${id}`), false, `${id} has no activation event`);
+  assert.equal(commandsSource.includes(`register("${id.replace("wipstream.", "")}"`), false, `${id} has no handler`);
+}
 
 assert.match(commandsSource, /operation=\$\{operationId\}/, "Output records include operation ids");
-assert.match(commandsSource, /confirmMigrationPreview/, "Initialize exposes the version 1 migration preview");
+assert.doesNotMatch(commandsSource, /confirmMigrationPreview/, "Initialize has no migration UI");
 assert.match(commandsSource, /inspectPendingMerge/, "pending merge context is inspected");
 assert.match(commandsSource, /inspectUndoEligibility/, "Undo visibility uses exact eligibility");
-assert.match(commandsSource, /no separate accepted\/WIP branch/, "legacy To Feature explains the v2 model");
-assert.match(commandsSource, /use Finish Branch/, "legacy To Main delegates users to generalized Finish after migration");
 
 console.log("WipStream generalized VS Code command-surface tests passed.");

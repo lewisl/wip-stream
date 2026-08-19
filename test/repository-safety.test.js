@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 
 const { GitRepository, GitWorktreeError, parseWorktreePorcelain } = require("../out/git");
-const { initialize, resume, saveUp } = require("../out/workflow");
+const { commitAndSave, getFromRemote, initializeRepository } = require("../out/generalized-workflow");
 const {
   CommandLockError,
   acquireRepositoryCommandLock,
@@ -98,7 +98,7 @@ function runParserCharacterization() {
 async function runLinkedWorktreeRefusals() {
   await withFixture("wipstream-safety-linked-", async (fixture) => {
     const first = await cloneRepository(fixture, "first");
-    await initialize(first.repo);
+    await initializeRepository(first.repo);
     const linkedOne = path.join(fixture.root, "linked-one");
     const linkedTwo = path.join(fixture.root, "linked-two");
     git(first.directory, ["worktree", "add", "-b", "linked-one", linkedOne, "main"]);
@@ -106,7 +106,7 @@ async function runLinkedWorktreeRefusals() {
     writeFileSync(path.join(linkedOne, "dirty.txt"), "must remain untouched\n");
     const dirtyBefore = git(linkedOne, ["status", "--porcelain=v1"]);
 
-    const error = await expectSafetyError(() => resume(first.repo), GitWorktreeError, "ADDITIONAL_WORKTREES");
+    const error = await expectSafetyError(() => getFromRemote(first.repo), GitWorktreeError, "ADDITIONAL_WORKTREES");
     assert.deepEqual(
       error.worktrees.map((worktree) => realpathSync(worktree.path)).sort(),
       [realpathSync(linkedOne), realpathSync(linkedTwo)].sort()
@@ -124,15 +124,17 @@ async function runLinkedWorktreeRefusals() {
 async function runFinalPreMutationRecheck() {
   await withFixture("wipstream-safety-injected-", async (fixture) => {
     const first = await cloneRepository(fixture, "first");
-    await initialize(first.repo);
+    await initializeRepository(first.repo);
     writeFileSync(path.join(first.directory, "pending.txt"), "not staged or committed\n");
     const before = git(first.directory, ["rev-parse", "HEAD"]);
     const injected = path.join(fixture.root, "injected");
 
     await expectSafetyError(
-      () => saveUp(first.repo, async () => {
-        git(first.directory, ["worktree", "add", "-b", "injected", injected, "main"]);
-        return "Must not commit";
+      () => commitAndSave(first.repo, {
+        requestCheckpointMessage: async () => {
+          git(first.directory, ["worktree", "add", "-b", "injected", injected, "main"]);
+          return "Must not commit";
+        },
       }),
       GitWorktreeError,
       "ADDITIONAL_WORKTREES"
@@ -152,7 +154,7 @@ async function runCommandLockRefusals() {
       "COMMAND_IN_PROGRESS"
     );
     assert.match(concurrent.message, /first command/);
-    await expectSafetyError(() => resume(first.repo), CommandLockError, "COMMAND_IN_PROGRESS");
+    await expectSafetyError(() => getFromRemote(first.repo), CommandLockError, "COMMAND_IN_PROGRESS");
     await firstLock.release();
 
     const stalePath = await commandLockPath(first.repo);

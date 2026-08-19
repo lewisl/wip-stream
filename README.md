@@ -36,8 +36,9 @@ push support, a clean working tree, and exactly one worktree. It then safely
 reconciles every ordinary local and remote branch in both directions and checks
 out the remote default branch.
 
-If the repository contains version 1 WipStream configuration, Initialize shows
-a migration preview and asks before changing ordinary refs.
+Version 1 migration was retired in WipStream 0.2.2. An overlooked version 1
+clone is detected and refused without changing it; install version 0.2.1,
+migrate it with Initialize Repository, and then reinstall the current version.
 
 ### Get from Remote (`wipstream.resume`)
 
@@ -122,46 +123,6 @@ move, or remote change blocks Undo rather than guessing.
 Human-readable receipts and recovery refs live in private Git metadata under
 `.git`; they are never tracked project files.
 
-## Version 1 migration
-
-An active version 1 repository has configured `main -> feature -> WIP` branch
-ancestry. Migration:
-
-- requires all three local tips to equal their fetched remote tips;
-- requires the remote WIP tip to equal this clone's last successful handoff;
-- advances the feature name to the existing WIP tip, preserving every commit;
-- deletes only the redundant WIP companion name locally and remotely;
-- records main as the feature parent; and
-- writes version 2 configuration only after complete branch reconciliation.
-
-Completed streams, including a safely stale clone whose temporary tips are
-already contained in completed remote main, convert without recreating those
-temporary branches. Partial, divergent, rewritten-without-proof, or otherwise
-unrecognized states refuse before changing ordinary refs or configuration.
-
-After one clone migrates and continues working, another version 1 clone can
-adopt that already-migrated remote even when its main and temporary tips are
-stale. The legacy conversion does not rewrite the remote feature: it requires
-the clone's last handed-off WIP and every remaining local legacy tip to be
-ancestors of the surviving remote feature, then retrieves remote main and
-feature transactionally. As with any Initialize, unrelated safe local branch
-advances are still reconciled with the remote.
-
-For the one realistic version 1 repository, use this controlled rehearsal while
-no other clone is active:
-
-1. Make sure the version 1 Save to Remote handoff succeeded and the worktree is
-   clean.
-2. Install the new extension and run **Initialize Repository**.
-3. Read the migration preview, approve it, and verify the files and branches.
-4. Before making any later change, run **Undo Last Action**.
-5. Verify the version 1 feature and WIP names, tips, configuration, and WIP
-   checkout returned.
-6. Run **Initialize Repository** again and approve the final migration.
-
-Undoing migration changes only refs and local WipStream configuration back to
-their exact recorded values; it does not reverse or recreate commit contents.
-
 ## One-worktree rule
 
 WipStream supports multiple separate clones and rejects repositories with
@@ -186,9 +147,7 @@ The normal commands keep their original IDs and chords:
 
 Start and Finish are ordinary Command Palette actions. Update, Reconcile,
 Continue, Abort, and Undo appear only when relevant. Condense is advanced and
-has no default chord. The old `wipstream.tofeature` and `wipstream.tomain` IDs
-remain callable for one compatibility release but are hidden from normal UI;
-they perform no implicit history rewrite or migration.
+has no default chord.
 
 ## Prerequisites
 
@@ -214,7 +173,7 @@ code --install-extension /path/to/lewisl.wipstream-<version>.vsix
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.2.1.vsix --force
+code --install-extension dist/lewisl.wipstream-0.2.2.vsix --force
 ```
 
 `npm test` uses disposable local bare remotes and clones; it never contacts a

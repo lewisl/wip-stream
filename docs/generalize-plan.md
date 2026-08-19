@@ -1,5 +1,9 @@
 # WipStream generalization: all branches, one working directory
 
+> Historical design record: version 1 migration and the temporary legacy
+> command handlers described below shipped in 0.2.0–0.2.1 and were retired in
+> 0.2.2 after the known repositories were migrated.
+
 ## Summary
 
 Replace the fixed `main -> feature -> wip/feature` model with ordinary Git

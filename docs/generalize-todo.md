@@ -1,5 +1,9 @@
 # Generalize implementation checklist
 
+> Historical implementation record: the version 1 compatibility work described
+> below was completed for 0.2.0–0.2.1 and retired in 0.2.2 after the known
+> repositories were migrated.
+
 This checklist implements `docs/generalize-plan.md`. Complete phases in order.
 Do not begin a later phase while an earlier exit gate is failing. Keep the
 normal interface centered on Initialize Repository, Get from Remote, and Commit

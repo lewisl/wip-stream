@@ -117,7 +117,7 @@ async function requireReconcileRepository(repo: GitRepository): Promise<{ remote
   }
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind !== "version2") {
-    return fail("VERSION_2_REQUIRED", "Initialize or migrate this repository before Reconcile.");
+    return fail("VERSION_2_REQUIRED", "Run Initialize Repository before Reconcile.");
   }
   const branch = await repo.currentBranch();
   if (!branch) {

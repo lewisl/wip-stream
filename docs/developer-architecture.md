@@ -33,23 +33,21 @@ Only the extension and command-adapter layers depend on the VS Code API. The wor
 
 - [`src/extension.ts`](../src/extension.ts) is the extension entry point. It activates WipStream and delegates command registration.
 - [`src/commands.ts`](../src/commands.ts) is the user-interface adapter. It registers command IDs, selects the repository, saves editor buffers, gathers confirmations and branch names, formats results for the Output panel, and maintains VS Code context keys that control when optional commands appear. Business rules belong in workflow modules rather than here.
-- [`src/constants.ts`](../src/constants.ts) contains the repository configuration versions and shared Git configuration keys.
+- [`src/constants.ts`](../src/constants.ts) contains the current repository configuration version, the legacy-version detector, and shared Git configuration keys.
 
 ### Workflow modules
 
 - [`src/generalized-workflow.ts`](../src/generalized-workflow.ts) implements the three normal version 2 workflows: **Initialize Repository**, **Get from Remote**, and **Commit and Save**. It inventories all ordinary branches, classifies their local and remote relationships, rejects unsafe combinations before changing ordinary state, performs synchronized updates, verifies the result, and reports parent-branch advisories.
 - [`src/lifecycle-workflow.ts`](../src/lifecycle-workflow.ts) implements optional branch-lifecycle operations: **Start Branch**, **Update from Parent**, **Finish Branch**, and **Condense Branch**. A branch's parent is recorded as intent, not inferred repeatedly from history. Updating from a parent uses a merge; history is not silently rebased or rewritten.
 - [`src/conflict-workflow.ts`](../src/conflict-workflow.ts) handles cases that need a human decision: **Reconcile with Remote**, **Continue Pending Merge**, and **Abort Pending Merge**. It records enough pre-merge state to verify that an abort restores the intended state.
-- [`src/migration-workflow.ts`](../src/migration-workflow.ts) recognizes version 1 repository shapes and migrates them to version 2. Its classifier distinguishes an active migration, a completed version 1 stream, a retry after partial progress, and a stale clone adopting a remote already migrated elsewhere. Migration is proof-based: similarly named branches are not deleted merely because they resemble version 1 temporary state.
 - [`src/undo-workflow.ts`](../src/undo-workflow.ts) implements exact-state **Undo Last Action**. Undo is available only for the newest eligible completed operation and only while the repository still matches that operation's recorded after-state. Remote reversal uses leases, so work that appeared later is not overwritten.
-- [`src/workflow.ts`](../src/workflow.ts) is the legacy version 1 engine for the fixed `main` / feature / temporary-WIP model. It remains as a compatibility baseline and for version 1 characterization tests. New version 2 behavior should not be added here.
 
 Some workflow modules intentionally compose others. For example, lifecycle actions use the normal Get and Save workflows, and conflict reconciliation can finish through Commit and Save. They still remain independent of the VS Code API.
 
 ### Repository and transaction infrastructure
 
 - [`src/git.ts`](../src/git.ts) is the low-level Git command facade. It runs the Git executable and provides typed operations for refs, branch relationships, status, commits, checkouts, merges, fetching, exact leased pushes, and multi-ref transactions. It also enforces the single-worktree rule before mutation. This module may inspect `git worktree list`, but WipStream never creates or manages worktrees.
-- [`src/repository-model.ts`](../src/repository-model.ts) translates raw refs and Git configuration into the model used by workflows. It reads version 1 and version 2 configuration, inventories branch tips before and after fetch, classifies branch relationships and remote changes, resolves the remote's default branch, and reads or records parent intent.
+- [`src/repository-model.ts`](../src/repository-model.ts) translates raw refs and Git configuration into the model used by workflows. It reads version 2 configuration, explicitly refuses the retired version 1 format, inventories branch tips before and after fetch, classifies branch relationships and remote changes, resolves the remote's default branch, and reads or records parent intent.
 - [`src/repository-safety.ts`](../src/repository-safety.ts) serializes WipStream commands within a clone. Its repository-local command lock detects another running command and leaves stale locks visible for deliberate inspection after interruption.
 - [`src/operations.ts`](../src/operations.ts) provides operation plans, receipts, mutation-boundary journaling, recovery refs, local ref transactions, previews, and incomplete-operation inspection. Compound workflows describe their intended mutations before applying them. This gives recovery and Undo code a concrete record of what was expected and what actually completed.
 
@@ -83,7 +81,7 @@ The details vary by command, but mutation-heavy version 2 workflows follow the s
 6. Write an operation receipt before crossing a mutation boundary.
 7. Push remote changes atomically with exact leases when the command publishes or deletes remote refs. Refetch and verify the result.
 8. Apply related local ref changes with one `git update-ref --stdin` transaction using expected old object IDs. Recovery refs preserve displaced commit tips.
-9. Apply checkout and Git-configuration transitions only after the remote and local ref boundaries are safe. Their exact order is command-specific; repository-version conversion is deferred until branch reconciliation has succeeded.
+9. Apply checkout and Git-configuration transitions only after the remote and local ref boundaries are safe. Their exact order is command-specific; initial version 2 configuration is deferred until branch reconciliation has succeeded.
 10. Verify postconditions such as local/remote parity, record the after-state, and complete the receipt.
 
 Expected-old checks and remote leases turn an unnoticed concurrent change into a refusal instead of an overwrite. Receipts remain incomplete when an operation stops inside a recoverable boundary, allowing the extension to offer only the recovery action appropriate to the recorded state.
@@ -99,7 +97,6 @@ The command set is intentionally larger than the normal path because exceptional
 - Explicit history cleanup: **Condense Branch**.
 - Conflict recovery: **Reconcile with Remote**, **Continue Pending Merge**, and **Abort Pending Merge**.
 - Exact reversal: **Undo Last Action**.
-- Compatibility: hidden version 1 command IDs retained for the migration window.
 
 The command palette uses context keys maintained by [`src/commands.ts`](../src/commands.ts) to hide operations that do not apply to the current repository state. The workflow layer still validates every precondition; UI visibility is guidance, not a safety boundary.
 
@@ -121,10 +118,9 @@ Tests are plain Node.js scripts. They use Node's assertion, filesystem, process,
 
 The suites mirror the source structure:
 
-- [`test/workflow.test.js`](../test/workflow.test.js) and [`test/v1-characterization.test.js`](../test/v1-characterization.test.js) preserve the legacy behavior needed for safe migration.
 - [`test/repository-model.test.js`](../test/repository-model.test.js), [`test/repository-safety.test.js`](../test/repository-safety.test.js), and [`test/operations.test.js`](../test/operations.test.js) cover the common model and safety machinery.
 - [`test/get-from-remote.test.js`](../test/get-from-remote.test.js), [`test/initialize-repository.test.js`](../test/initialize-repository.test.js), and [`test/commit-and-save.test.js`](../test/commit-and-save.test.js) cover normal use across branch inventories and clones.
-- [`test/lifecycle-workflow.test.js`](../test/lifecycle-workflow.test.js), [`test/conflict-workflow.test.js`](../test/conflict-workflow.test.js), [`test/undo-workflow.test.js`](../test/undo-workflow.test.js), and [`test/migration-workflow.test.js`](../test/migration-workflow.test.js) cover the optional and recovery paths.
+- [`test/lifecycle-workflow.test.js`](../test/lifecycle-workflow.test.js), [`test/conflict-workflow.test.js`](../test/conflict-workflow.test.js), and [`test/undo-workflow.test.js`](../test/undo-workflow.test.js) cover the optional and recovery paths.
 - [`test/command-surface.test.js`](../test/command-surface.test.js) checks the extension manifest, command IDs, titles, keybindings, context visibility, and registered handlers.
 - [`test/live.js`](../test/live.js) drives the packaged extension through an isolated two-window manual test environment.
 

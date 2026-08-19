@@ -21,7 +21,6 @@ const UNDOABLE = new Set([
   "Finish Branch",
   "Condense Branch",
   "Update from Parent",
-  "Migrate Version 1",
 ]);
 
 export class UndoWorkflowError extends Error {

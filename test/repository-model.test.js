@@ -5,7 +5,6 @@ const os = require("os");
 const path = require("path");
 
 const { GitRepository } = require("../out/git");
-const { initialize } = require("../out/workflow");
 const {
   RepositoryModelError,
   getBranchParent,
@@ -116,13 +115,11 @@ async function runConfigurationAndParentIntent() {
 async function runMutationFreeInspection() {
   await withFixture("wipstream-model-inspection-", async (fixture) => {
     const first = await cloneRepository(fixture, "first");
-    await initialize(first.repo);
-
-    const beforeV1 = repositoryState(first.directory);
-    const v1 = await inspectRepository(first.repo);
-    assert.equal(v1.configuration.kind, "version1");
-    assert.equal(v1.remoteDefaultBranch, "main");
-    assert.deepEqual(repositoryState(first.directory), beforeV1, "version 1 inspection is read-only");
+    git(first.directory, ["config", "--local", "wipstream.version", "1"]);
+    const beforeLegacy = repositoryState(first.directory);
+    await expectModelError(() => readRepositoryConfiguration(first.repo), "LEGACY_VERSION_UNSUPPORTED");
+    await expectModelError(() => inspectRepository(first.repo), "LEGACY_VERSION_UNSUPPORTED");
+    assert.deepEqual(repositoryState(first.directory), beforeLegacy, "legacy-version refusal is read-only");
 
     await writeRepositoryConfiguration(first.repo, { remote: "origin" });
     const beforeV2 = repositoryState(first.directory);

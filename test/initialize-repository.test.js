@@ -212,6 +212,29 @@ async function runDivergenceRefusal() {
   });
 }
 
+async function runLegacyVersionRefusal() {
+  await withFixture("wipstream-initialize-legacy-", async (fixture) => {
+    const clone = await cloneRepository(fixture, "clone");
+    git(clone.directory, ["config", "--local", "wipstream.version", "1"]);
+    git(clone.directory, ["config", "--local", "wipstream.remote", "origin"]);
+    const localBefore = heads(clone.directory);
+    const remoteBefore = heads(fixture.remote);
+    const checkoutBefore = git(clone.directory, ["branch", "--show-current"]);
+    const configurationBefore = git(clone.directory, ["config", "--local", "--list"]);
+
+    await assert.rejects(
+      () => initializeRepository(clone.repo),
+      (error) => error?.code === "LEGACY_VERSION_UNSUPPORTED" && error.message.includes("0.2.1")
+    );
+
+    assert.equal(heads(clone.directory), localBefore);
+    assert.equal(heads(fixture.remote), remoteBefore);
+    assert.equal(git(clone.directory, ["branch", "--show-current"]), checkoutBefore);
+    assert.equal(git(clone.directory, ["config", "--local", "--list"]), configurationBefore);
+    assert.deepEqual(await listOperationReceipts(clone.repo), []);
+  });
+}
+
 async function runRemoteSuccessLocalFailureRetry() {
   await withFixture("wipstream-initialize-retry-", async (fixture) => {
     const clone = await cloneRepository(fixture, "clone");
@@ -248,6 +271,7 @@ Promise.resolve()
   .then(runFreshCloneInitialization)
   .then(runBidirectionalInitialization)
   .then(runDivergenceRefusal)
+  .then(runLegacyVersionRefusal)
   .then(runRemoteSuccessLocalFailureRetry)
   .then(() => console.log("WipStream bidirectional Initialize Repository tests passed."))
   .catch((error) => {
