@@ -1,4 +1,5 @@
 import { GitError, GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
+import { CONFIG_KEYS, REPOSITORY_CONFIG_VERSION } from "./constants";
 import {
   BranchInventoryEntry,
   getBranchParent,
@@ -6,13 +7,13 @@ import {
   readRepositoryConfiguration,
   resolveRemoteDefaultBranch,
   snapshotRemoteTips,
-  writeRepositoryConfiguration,
 } from "./repository-model";
 import { withRepositoryCommandLock } from "./repository-safety";
 import {
   applyLocalRefTransaction,
   beginOperation,
   CheckpointTransition,
+  ConfigurationTransition,
   completeOperation,
   createOperationPlan,
   inspectIncompleteOperations,
@@ -106,7 +107,7 @@ interface ApplyReconciliationOptions {
   readonly inventory: readonly BranchInventoryEntry[];
   readonly checkpoint?: CheckpointTransition;
   readonly hooks?: Pick<CommitAndSaveHooks, "beforeRemotePush" | "afterRemotePush">;
-  readonly configure?: (synchronizedTips: ReadonlyMap<string, string>) => Promise<void>;
+  readonly configurationChanges?: readonly ConfigurationTransition[];
 }
 
 export class GeneralizedWorkflowError extends Error {
@@ -297,6 +298,26 @@ async function snapshotLocalTips(repo: GitRepository): Promise<ReadonlyMap<strin
   return new Map((await repo.listRefs(prefix)).map((ref) => [ref.name.slice(prefix.length), ref.objectId]));
 }
 
+async function trackingConfigurationChanges(
+  repo: GitRepository,
+  remote: string,
+  branches: readonly string[]
+): Promise<ConfigurationTransition[]> {
+  const changes: ConfigurationTransition[] = [];
+  for (const branch of [...branches].sort()) {
+    for (const [key, value] of [
+      [`branch.${branch}.remote`, remote],
+      [`branch.${branch}.merge`, `refs/heads/${branch}`],
+    ] as const) {
+      const before = await repo.getConfigValues(key);
+      if (before.length !== 1 || before[0] !== value) {
+        changes.push({ key, before, after: [value] });
+      }
+    }
+  }
+  return changes;
+}
+
 async function requireUnchangedInitializeCheckout(
   repo: GitRepository,
   expectedBranch: string,
@@ -392,7 +413,7 @@ async function applyBidirectionalReconciliation(
     inventory,
     checkpoint,
     hooks = {},
-    configure,
+    configurationChanges = [],
   } = options;
   const classifiedLocalTips = inventoryLocalTips(inventory);
   const publishUpdates = remoteUpdates(inventory, repo);
@@ -412,6 +433,7 @@ async function applyBidirectionalReconciliation(
     remoteRefUpdates: publishUpdates.map((update) => ({ ref: update.ref, proposed: update.proposed })),
     remoteLeases: publishUpdates.map((update) => ({ ref: update.ref, expected: update.expected })),
     checkpoint,
+    configurationChanges,
     checkout: { before: currentBranch, after: targetCheckout },
     destructiveEffects: [
       ...deleted.map((branch) => ({
@@ -471,9 +493,12 @@ async function applyBidirectionalReconciliation(
   }
 
   await verifyBranchParity(repo, remote, command);
-  const synchronizedTips = await snapshotRemoteTips(repo, remote);
-  if (configure) {
-    await withMutationBoundary(repo, plan.operationId, "configuration", () => configure(synchronizedTips));
+  if (configurationChanges.length) {
+    await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
+      for (const change of configurationChanges) {
+        await repo.replaceConfigValues(change.key, change.after);
+      }
+    });
   }
   await completeOperation(repo, plan.operationId);
   return { operationId: plan.operationId, checkout: targetCheckout, published, created, fastForwarded, deleted };
@@ -541,6 +566,24 @@ async function initializeRepositoryUnlocked(
     return fail("REMOTE_DEFAULT_MISSING", `Remote default branch “${remoteDefaultBranch}” has no fetched tip.`);
   }
   await repo.verifyAtomicPushSupport(remote, repo.localRef(remoteDefaultBranch), defaultTip);
+  const synchronizedBranches = [...new Set([
+    ...fetchedRemoteTips.keys(),
+    ...inventory.filter((branch) => branch.relation === "local-only").map((branch) => branch.name),
+  ])].sort();
+  const configurationChanges: ConfigurationTransition[] = [
+    {
+      key: `remote.${remote}.fetch`,
+      before: await repo.getConfigValues(`remote.${remote}.fetch`),
+      after: [`+refs/heads/*:refs/remotes/${remote}/*`],
+    },
+    ...await trackingConfigurationChanges(repo, remote, synchronizedBranches),
+    { key: CONFIG_KEYS.remote, before: await repo.getConfigValues(CONFIG_KEYS.remote), after: [remote] },
+    {
+      key: CONFIG_KEYS.version,
+      before: await repo.getConfigValues(CONFIG_KEYS.version),
+      after: [REPOSITORY_CONFIG_VERSION],
+    },
+  ];
   return applyBidirectionalReconciliation(repo, {
     command: "Initialize Repository",
     remote,
@@ -549,20 +592,7 @@ async function initializeRepositoryUnlocked(
     fetchedRemoteTips,
     inventory,
     hooks,
-    configure: async (synchronizedTips) => {
-      await repo.configureFullBranchFetch(remote);
-      for (const branch of [...synchronizedTips.keys()].sort()) {
-        await repo.configureTracking(branch, remote);
-      }
-      const expectedFetch = `+refs/heads/*:refs/remotes/${remote}/*`;
-      if (!(await repo.getConfigValues(`remote.${remote}.fetch`)).includes(expectedFetch)) {
-        return fail(
-          "FULL_FETCH_CONFIGURATION_FAILED",
-          `Initialize Repository could not configure full branch fetches for “${remote}”.`
-        );
-      }
-      await writeRepositoryConfiguration(repo, { remote });
-    },
+    configurationChanges,
   });
 }
 
@@ -671,6 +701,15 @@ async function commitAndSaveUnlocked(
   }
 
   const targetCheckout = await checkoutAfterGet(repo, currentBranch, remoteDefaultBranch, inventory);
+  const synchronizedBranches = [...new Set([
+    ...fetchedRemoteTips.keys(),
+    ...inventory.filter((branch) => branch.relation === "local-only").map((branch) => branch.name),
+  ])].sort();
+  const configurationChanges = await trackingConfigurationChanges(
+    repo,
+    configuration.remote,
+    synchronizedBranches
+  );
   let applied: AppliedReconciliationResult;
   try {
     applied = await applyBidirectionalReconciliation(repo, {
@@ -682,11 +721,7 @@ async function commitAndSaveUnlocked(
       inventory,
       checkpoint,
       hooks,
-      configure: async (synchronizedTips) => {
-        for (const branch of [...synchronizedTips.keys()].sort()) {
-          await repo.configureTracking(branch, configuration.remote);
-        }
-      },
+      configurationChanges,
     });
   } catch (error) {
     const incomplete = (await inspectIncompleteOperations(repo))[0];

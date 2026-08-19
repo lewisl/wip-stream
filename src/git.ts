@@ -203,6 +203,18 @@ export class GitRepository {
     await this.run(["config", "--local", key, value]);
   }
 
+  public async replaceConfigValues(key: string, values: readonly string[]): Promise<void> {
+    await this.assertSingleWorktree();
+    const unset = await this.tryRun(["config", "--local", "--unset-all", key]);
+    if (unset.exitCode !== 0 && unset.exitCode !== 5) {
+      throw new GitError(["config", "--local", "--unset-all", key], unset.stderr.trim(), unset.exitCode);
+    }
+    for (const value of values) {
+      await this.assertSingleWorktree();
+      await this.run(["config", "--local", "--add", key, value]);
+    }
+  }
+
   public async commonGitDirectory(): Promise<string> {
     return path.resolve(this.root, await this.run(["rev-parse", "--git-common-dir"]));
   }
@@ -486,6 +498,14 @@ export class GitRepository {
     await this.assertSingleWorktree();
     const tree = await this.run(["rev-parse", `${treeish}^{tree}`]);
     return this.run(["commit-tree", tree, "-p", parent, "-m", message]);
+  }
+
+  public async restoreCommitChanges(before: string, after: string): Promise<void> {
+    await this.assertSingleWorktree();
+    const patch = await this.run(["diff", "--binary", before, after]);
+    if (patch) {
+      await this.runWithInput(["apply"], `${patch}\n`);
+    }
   }
 
   public async removeBranchConfiguration(branch: string): Promise<void> {

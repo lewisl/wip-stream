@@ -15,6 +15,7 @@ import {
   createOperationPlan,
   inspectIncompleteOperations,
   recordPendingMerge,
+  recordOperationOutcome,
   recoveryRef,
   withMutationBoundary,
 } from "./operations";
@@ -269,6 +270,13 @@ async function updateFromParentUnlocked(
     }
     throw error;
   }
+  await recordOperationOutcome(repo, plan.operationId, {
+    additionalLocalRefUpdates: [{
+      ref: repo.localRef(branch),
+      expectedOld: before,
+      proposed: await repo.hash(repo.localRef(branch)),
+    }],
+  });
   await completeOperation(repo, plan.operationId);
   return { operationId: plan.operationId, branch, parent, updated: true };
 }
@@ -326,11 +334,19 @@ async function finishBranchUnlocked(
   if (disposition === "delete") {
     localUpdates.push({ ref: repo.localRef(branch), expectedOld: branchTip, proposed: null });
   }
+  const configurationChanges = disposition === "delete"
+    ? await Promise.all([
+      `branch.${branch}.remote`,
+      `branch.${branch}.merge`,
+      `branch.${branch}.wipstreamParent`,
+    ].map(async (key) => ({ key, before: await repo.getConfigValues(key), after: [] })))
+    : [];
   const plan = createOperationPlan({
     command: "Finish Branch",
     localRefUpdates: localUpdates,
     remoteRefUpdates: remoteUpdates.map((update) => ({ ref: update.ref, proposed: update.proposed })),
     remoteLeases: remoteUpdates.map((update) => ({ ref: update.ref, expected: update.expected })),
+    configurationChanges,
     checkout: { before: branch, after: parent },
     destructiveEffects: [
       { kind: "replace-checkout", ref: repo.localRef(branch), description: `Switch from ${branch} to ${parent}` },
@@ -347,7 +363,9 @@ async function finishBranchUnlocked(
   await applyLocalRefTransaction(repo, plan);
   await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(parent));
   if (disposition === "delete") {
-    await withMutationBoundary(repo, plan.operationId, "configuration", () => repo.removeBranchConfiguration(branch));
+    await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
+      for (const change of configurationChanges) await repo.replaceConfigValues(change.key, change.after);
+    });
   }
   await verifyParity(repo, remote, "Finish Branch");
   await completeOperation(repo, plan.operationId);

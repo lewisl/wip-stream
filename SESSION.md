@@ -17,7 +17,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 8 are complete. The recorded baseline is in
+- Phases 0 through 9 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -56,9 +56,13 @@
   merge discovery shared with Update. Continue requires resolved paths before
   committing and saving; Abort verifies the recorded branch, HEAD, index tree,
   worktree status, and Git-operation state before marking a receipt aborted.
+- `src/undo-workflow.ts` derives reverse plans from the latest eligible receipt,
+  verifies complete local/configuration/remote after-state, reverses remote
+  refs with exact leases and local refs transactionally, restores checkout and
+  configuration, and returns Save checkpoint contents to the working tree.
 - TypeScript now explicitly targets ES2020 with Node module resolution and
   Node/VS Code ambient types, matching the declared VS Code runtime and
   resolving editor diagnostics for modern array/string methods and Node
   built-in modules.
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 9 by implementing exact-state, receipt-driven Undo.
+- Begin Phase 10 by implementing deterministic version 1 migration.

@@ -15,6 +15,7 @@ import {
   createOperationPlan,
   inspectIncompleteOperations,
   recordOperationPhase,
+  recordOperationOutcome,
   recordPendingMerge,
   recoveryRef,
   withMutationBoundary,
@@ -201,6 +202,13 @@ async function reconcileWithRemoteUnlocked(repo: GitRepository): Promise<Reconci
     }
     throw error;
   }
+  await recordOperationOutcome(repo, plan.operationId, {
+    additionalLocalRefUpdates: [{
+      ref: repo.localRef(branch),
+      expectedOld: before,
+      proposed: await repo.hash(repo.localRef(branch)),
+    }],
+  });
   await completeOperation(repo, plan.operationId);
   return { operationId: plan.operationId, branch, pending: false, conflicts: [] };
 }
@@ -248,6 +256,13 @@ async function continuePendingMergeUnlocked(
   await repo.stageAll();
   await repo.commitMerge();
   await recordOperationPhase(repo, receipt.plan.operationId, "after-merge");
+  await recordOperationOutcome(repo, receipt.plan.operationId, {
+    additionalLocalRefUpdates: [{
+      ref: repo.localRef(pending.branch),
+      expectedOld: pending.preHead,
+      proposed: await repo.hash(repo.localRef(pending.branch)),
+    }],
+  });
   await completeOperation(repo, receipt.plan.operationId);
   return { operationId: receipt.plan.operationId, command: pending.command };
 }

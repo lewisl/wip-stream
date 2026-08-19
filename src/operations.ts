@@ -32,6 +32,20 @@ export interface CheckpointTransition {
   readonly message: string;
 }
 
+export interface ConfigurationTransition {
+  readonly key: string;
+  readonly before: readonly string[];
+  readonly after: readonly string[];
+}
+
+export interface OperationOutcome {
+  readonly additionalLocalRefUpdates: readonly GitRefUpdate[];
+  readonly completedLocalRefs?: readonly { readonly ref: string; readonly objectId: string }[];
+  readonly completedRemoteRefs?: readonly { readonly ref: string; readonly objectId: string }[];
+  readonly completedCheckout?: string;
+  readonly completedStatus?: string;
+}
+
 export interface DestructiveEffect {
   readonly kind: DestructiveEffectKind;
   readonly ref?: string;
@@ -47,6 +61,7 @@ export interface OperationPlan {
   readonly remoteRefUpdates: readonly RemoteRefUpdate[];
   readonly remoteLeases: readonly RemoteLease[];
   readonly checkpoint?: Readonly<CheckpointTransition>;
+  readonly configurationChanges: readonly Readonly<ConfigurationTransition>[];
   readonly checkout: Readonly<CheckoutTransition>;
   readonly destructiveEffects: readonly DestructiveEffect[];
 }
@@ -59,6 +74,7 @@ export interface OperationPlanInput {
   readonly remoteRefUpdates?: readonly RemoteRefUpdate[];
   readonly remoteLeases?: readonly RemoteLease[];
   readonly checkpoint?: CheckpointTransition;
+  readonly configurationChanges?: readonly ConfigurationTransition[];
   readonly checkout?: CheckoutTransition;
   readonly destructiveEffects?: readonly DestructiveEffect[];
 }
@@ -70,9 +86,9 @@ export type MutationBoundary =
   | "checkout"
   | "configuration"
   | "merge";
-export type TerminalOperationPhase = "completed" | "aborted";
+export type TerminalOperationPhase = "completed" | "aborted" | "undone";
 export type OperationPhase = "planned" | `before-${MutationBoundary}` | `after-${MutationBoundary}` | TerminalOperationPhase;
-export type OperationStatus = "planned" | "in-progress" | "completed" | "aborted";
+export type OperationStatus = "planned" | "in-progress" | "completed" | "aborted" | "undone";
 
 export interface PendingMerge {
   readonly kind: "merge";
@@ -97,6 +113,7 @@ export interface OperationReceipt {
   readonly status: OperationStatus;
   readonly events: readonly OperationReceiptEvent[];
   readonly pendingMerge?: Readonly<PendingMerge>;
+  readonly outcome?: Readonly<OperationOutcome>;
   readonly completedAt?: string;
 }
 
@@ -145,6 +162,11 @@ export function createOperationPlan(input: OperationPlanInput): OperationPlan {
     remoteRefUpdates: immutableEntries(input.remoteRefUpdates),
     remoteLeases: immutableEntries(input.remoteLeases),
     ...(input.checkpoint ? { checkpoint: Object.freeze({ ...input.checkpoint }) } : {}),
+    configurationChanges: Object.freeze((input.configurationChanges ?? []).map((change) => Object.freeze({
+      key: change.key,
+      before: Object.freeze([...change.before]),
+      after: Object.freeze([...change.after]),
+    }))),
     checkout: Object.freeze({ ...(input.checkout ?? {}) }),
     destructiveEffects: immutableEntries(input.destructiveEffects),
   });
@@ -226,7 +248,7 @@ function isOperationReceipt(value: unknown): value is OperationReceipt {
     && receipt.plan !== null
     && typeof receipt.plan.operationId === "string"
     && typeof receipt.phase === "string"
-    && ["planned", "in-progress", "completed", "aborted"].includes(String(receipt.status))
+    && ["planned", "in-progress", "completed", "aborted", "undone"].includes(String(receipt.status))
     && Array.isArray(receipt.events);
 }
 
@@ -347,6 +369,30 @@ export async function recordPendingMerge(
   return updated;
 }
 
+export async function recordOperationOutcome(
+  repo: GitRepository,
+  operationId: string,
+  outcome: OperationOutcome
+): Promise<OperationReceipt> {
+  const receipt = await readOperationReceipt(repo, operationId);
+  if (receipt.status !== "planned" && receipt.status !== "in-progress") {
+    return fail("OPERATION_NOT_IN_PROGRESS", `WipStream operation ${operationId} is not active.`);
+  }
+  const updated: OperationReceipt = {
+    ...receipt,
+    outcome: Object.freeze({
+      ...receipt.outcome,
+      additionalLocalRefUpdates: immutableEntries(outcome.additionalLocalRefUpdates),
+      ...(outcome.completedLocalRefs ? { completedLocalRefs: immutableEntries(outcome.completedLocalRefs) } : {}),
+      ...(outcome.completedRemoteRefs ? { completedRemoteRefs: immutableEntries(outcome.completedRemoteRefs) } : {}),
+      ...(outcome.completedCheckout !== undefined ? { completedCheckout: outcome.completedCheckout } : {}),
+      ...(outcome.completedStatus !== undefined ? { completedStatus: outcome.completedStatus } : {}),
+    }),
+  };
+  await writeReceipt(await operationReceiptPath(repo, operationId), updated, false);
+  return updated;
+}
+
 export async function abortOperation(repo: GitRepository, operationId: string): Promise<OperationReceipt> {
   const receipt = await readOperationReceipt(repo, operationId);
   if (receipt.status !== "in-progress") {
@@ -359,6 +405,22 @@ export async function abortOperation(repo: GitRepository, operationId: string): 
     status: "aborted",
     events: [...receipt.events, { phase: "aborted", recordedAt }],
     completedAt: recordedAt,
+  };
+  await writeReceipt(await operationReceiptPath(repo, operationId), updated, false);
+  return updated;
+}
+
+export async function markOperationUndone(repo: GitRepository, operationId: string): Promise<OperationReceipt> {
+  const receipt = await readOperationReceipt(repo, operationId);
+  if (receipt.status !== "completed") {
+    return fail("OPERATION_NOT_COMPLETED", `WipStream operation ${operationId} is not completed.`);
+  }
+  const recordedAt = new Date().toISOString();
+  const updated: OperationReceipt = {
+    ...receipt,
+    phase: "undone",
+    status: "undone",
+    events: [...receipt.events, { phase: "undone", recordedAt }],
   };
   await writeReceipt(await operationReceiptPath(repo, operationId), updated, false);
   return updated;
@@ -421,6 +483,17 @@ export async function completeOperation(
   operationId: string,
   retainCompleted = 50
 ): Promise<OperationReceipt> {
+  const receiptBeforeCompletion = await readOperationReceipt(repo, operationId);
+  await recordOperationOutcome(repo, operationId, {
+    additionalLocalRefUpdates: receiptBeforeCompletion.outcome?.additionalLocalRefUpdates ?? [],
+    completedLocalRefs: (await repo.listRefs("refs/heads/"))
+      .map((ref) => ({ ref: ref.name, objectId: ref.objectId })),
+    completedRemoteRefs: (await repo.listRefs("refs/remotes/"))
+      .filter((ref) => !ref.name.endsWith("/HEAD"))
+      .map((ref) => ({ ref: ref.name, objectId: ref.objectId })),
+    completedCheckout: await repo.currentBranch(),
+    completedStatus: await repo.statusPorcelain(),
+  });
   const receipt = await recordOperationPhase(repo, operationId, "completed");
   await pruneCompletedReceipts(repo, retainCompleted);
   return receipt;

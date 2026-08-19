@@ -266,29 +266,29 @@ Exit gate:
 
 ## Phase 9: Add safe Undo
 
-- [ ] Determine whether the latest completed operation is undoable from its
+- [x] Determine whether the latest completed operation is undoable from its
   receipt and current state.
-- [ ] Require a clean single worktree.
-- [ ] Verify exact local and remote after-values before changing anything.
-- [ ] Revert remote changes atomically with exact leases.
-- [ ] Revert local refs through expected-old-value transactions.
-- [ ] Restore the original checkout.
-- [ ] For Commit and Save, return checkpoint contents to the working directory
+- [x] Require a clean single worktree.
+- [x] Verify exact local and remote after-values before changing anything.
+- [x] Revert remote changes atomically with exact leases.
+- [x] Revert local refs through expected-old-value transactions.
+- [x] Restore the original checkout.
+- [x] For Commit and Save, return checkpoint contents to the working directory
   when restoring the previous branch tip.
-- [ ] Refuse without mutation when later local or remote work exists.
-- [ ] Make Undo visible only when the current receipt is eligible.
+- [x] Refuse without mutation when later local or remote work exists.
+- [x] Make Undo visible only when the current receipt is eligible.
 
 Tests:
 
-- [ ] Undo covers Get, Init, Save, Finish-retain, Finish-delete, Condense, and
+- [x] Undo covers Get, Init, Save, Finish-retain, Finish-delete, Condense, and
   clean Update.
-- [ ] Any later local commit, working-tree edit, ref move, or remote push blocks
+- [x] Any later local commit, working-tree edit, ref move, or remote push blocks
   Undo.
-- [ ] Interrupted Undo remains inspectable and retryable.
+- [x] Interrupted Undo remains inspectable and retryable.
 
 Exit gate:
 
-- [ ] Users can reverse the last eligible WipStream action without reflog or
+- [x] Users can reverse the last eligible WipStream action without reflog or
   ref-manipulation commands.
 
 ## Phase 10: Implement version 1 migration
