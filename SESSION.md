@@ -10,10 +10,11 @@
 
 ## Current branch: `generalize`
 
-- The generalized multi-stream design and implementation sequence are recorded
-  in `docs/generalize-plan.md`.
+- The approved ordinary-branch design is recorded in
+  `docs/generalize-plan.md`.
+- The ordered implementation checklist and acceptance gates are recorded in
+  `docs/generalize-todo.md`.
 - The current implementation is the version 1 compatibility baseline. Its
   isolated two-window end-to-end live test is still outstanding.
-- Begin implementation with the first slice described at the end of the plan;
-  keep existing commands and tests passing while separating repository settings
-  from stream-scoped state.
+- Begin with Phase 0 of the checklist and do not change source before the
+  version 1 baseline is characterized.

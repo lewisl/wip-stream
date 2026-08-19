@@ -1,0 +1,349 @@
+# Generalize implementation checklist
+
+This checklist implements `docs/generalize-plan.md`. Complete phases in order.
+Do not begin a later phase while an earlier exit gate is failing. Keep the
+normal interface centered on Initialize Repository, Get from Remote, and Commit
+and Save.
+
+## Phase 0: Preserve the version 1 baseline
+
+- [ ] Run and record the current automated workflow test result before changing
+  source.
+- [ ] Add missing characterization tests for every current command result and
+  failure code that migration or compatibility code will depend on.
+- [ ] Capture fixtures for an active stream, a completed stream, a stale clone,
+  a WIP rewrite, partial temporary branches, and divergent temporary branches.
+- [ ] Confirm existing commit-hook, dirty-submodule, cancelled-message,
+  untracked-file, and two-clone behaviors remain represented.
+
+Exit gate:
+
+- [ ] The unchanged version 1 implementation passes all characterization tests.
+- [ ] Every existing public command id has an explicit compatibility expectation.
+
+## Phase 1: Introduce the version 2 repository model
+
+- [ ] Replace the fixed main/feature/WIP configuration type with repository
+  configuration containing schema version and selected remote.
+- [ ] Add helpers for reading and writing local
+  `branch.<name>.wipstreamParent` intent.
+- [ ] Define the ordinary branch universe as local and remote
+  `refs/heads/*`, excluding internal WipStream recovery refs.
+- [ ] Resolve and validate the remote default branch through its symbolic HEAD.
+- [ ] Add branch inventory types containing local tip, previous remote tip,
+  fetched remote tip, tracking state, checked-out state, and relation.
+- [ ] Add deterministic classification for equal, local-ahead, local-only,
+  remote-ahead, remote-only, diverged, and remotely deleted branches.
+- [ ] Keep version 1 configuration readable without converting it yet.
+
+Tests:
+
+- [ ] Inventory covers multiple branches, slash-containing names, local-only
+  branches, remote-only branches, force-rewritten branches, and remote deletion.
+- [ ] Missing or ambiguous remote HEAD produces an actionable refusal.
+- [ ] Tags and internal refs never enter the ordinary branch inventory.
+
+Exit gate:
+
+- [ ] The new model can inspect version 1 and version 2 repositories without
+  moving refs or changing configuration.
+
+## Phase 2: Enforce one clone and one worktree
+
+- [ ] Add structured `git worktree list --porcelain` parsing to the Git facade.
+- [ ] Require exactly one worktree at the start of every mutating workflow.
+- [ ] Recheck immediately before every local-ref transaction and remote push.
+- [ ] Report every additional worktree path, HEAD, and checked-out branch.
+- [ ] Add a repository-local WipStream command lock with stale-lock diagnostics.
+- [ ] Ensure WipStream never invokes worktree add, move, repair, prune, unlock,
+  or remove.
+
+Tests:
+
+- [ ] A clean linked worktree blocks mutation.
+- [ ] A dirty linked worktree blocks mutation without inspecting or modifying
+  its files.
+- [ ] A linked worktree injected after initial preflight is caught by the final
+  pre-mutation check.
+- [ ] Two separate clones remain supported.
+- [ ] Concurrent WipStream commands in one clone serialize or refuse cleanly.
+
+Exit gate:
+
+- [ ] No mutating workflow can proceed while a linked worktree is known to
+  exist.
+
+## Phase 3: Build plans, local ref transactions, and receipts
+
+- [ ] Represent each compound action as an immutable operation plan with
+  expected old refs, proposed refs, remote leases, checkout before/after, and
+  destructive effects.
+- [ ] Add expected-old-value multi-ref updates using
+  `git update-ref --stdin`.
+- [ ] Define the private operation-receipt directory and JSON schema.
+- [ ] Define internal recovery refs using operation ids and ordinal ref names so
+  arbitrary branch names cannot collide.
+- [ ] Record operation phases before and after every mutation boundary.
+- [ ] Add repository inspection for incomplete operations.
+- [ ] Define bounded completed-receipt retention while retaining incomplete
+  operations until resolved.
+- [ ] Add preview rendering shared by the Output channel and confirmations.
+
+Tests:
+
+- [ ] A mismatched expected local ref aborts the whole local ref transaction.
+- [ ] Receipts survive interruption after every operation phase.
+- [ ] Recovery refs keep rewritten or deleted commits reachable.
+- [ ] Preview changes no project file, ordinary ref, config value, or remote ref.
+
+Exit gate:
+
+- [ ] A simulated interruption always yields either the complete before-state,
+  the complete after-state, or an inspectable incomplete receipt with all data
+  needed to retry or undo.
+
+## Phase 4: Implement transactional Get from Remote
+
+- [ ] Save the current branch name and pre-fetch local/remote-tracking inventory.
+- [ ] Require a stable, clean single worktree.
+- [ ] Fetch and prune every branch from the configured remote.
+- [ ] Treat local-ahead, local-only, diverged, and ambiguous deletion as unsafe
+  for Get.
+- [ ] Prove a remote deletion safe only when local tip equals the pre-fetch
+  remote-tracking tip.
+- [ ] Preflight every branch before moving any ordinary local ref.
+- [ ] Create remote-only local branches and configure their tracking relation.
+- [ ] Fast-forward remote-ahead local branches.
+- [ ] Delete only proven-safe stale local branches while retaining recovery refs.
+- [ ] Preserve the prior checkout; if it was safely deleted, select its surviving
+  recorded parent or the remote default.
+- [ ] Verify local branch names and tips equal fetched remote branch names and
+  tips before reporting success.
+- [ ] Emit non-blocking parent ancestry advisories after success.
+
+Tests:
+
+- [ ] Several safe branches update together.
+- [ ] One unsafe branch prevents every ordinary local branch and working-tree
+  update.
+- [ ] Fetch may update remote-tracking refs on refusal, but ordinary refs remain
+  unchanged.
+- [ ] Current-branch fast-forward updates files correctly.
+- [ ] Safe deletion of the current branch selects the required fallback.
+- [ ] Repeating a successful or refused Get is idempotent.
+
+Exit gate:
+
+- [ ] Successful Get establishes complete local/remote branch parity.
+- [ ] Refused Get preserves all ordinary local refs and the working tree.
+
+## Phase 5: Implement bidirectional Initialize Repository
+
+- [ ] Validate full clone, non-bare state, remote reachability, remote default
+  branch, full branch fetch coverage, and atomic-push capability.
+- [ ] Require a clean, stable, single worktree before bootstrap.
+- [ ] Plan local-ahead/local-only publication and remote-ahead/remote-only local
+  updates across the whole branch set.
+- [ ] Refuse any same-branch divergence or ambiguous deletion before mutation.
+- [ ] Push all local advances atomically with exact leases.
+- [ ] Apply fetched local changes through the shared local transaction engine.
+- [ ] Check out the remote default branch after successful first initialization.
+- [ ] Write version 2 configuration only after branch reconciliation succeeds.
+
+Tests:
+
+- [ ] Fresh clone with several remote branches initializes completely.
+- [ ] Existing repository with unrelated local and remote advances reconciles in
+  both directions.
+- [ ] Local-only branches are published.
+- [ ] True divergence changes neither ordinary local nor remote refs.
+- [ ] Remote success followed by injected local failure produces an incomplete
+  receipt and a retryable remote-authoritative state.
+
+Exit gate:
+
+- [ ] Successful Init establishes version 2 configuration and complete branch
+  parity with the remote default checked out.
+
+## Phase 6: Implement Commit and Save
+
+- [ ] Save file-backed VS Code documents belonging to the selected repository.
+- [ ] Reject pre-existing Git operations, unresolved conflicts, dirty
+  submodules, and additional worktrees.
+- [ ] Stage all non-ignored additions, modifications, and deletions.
+- [ ] Prompt for a checkpoint message only when staged content exists.
+- [ ] Create the current-branch checkpoint before network reconciliation.
+- [ ] Preserve staged work when a commit hook rejects the checkpoint.
+- [ ] Fetch and classify all branches after checkpointing.
+- [ ] On true divergence, push nothing, retain the local checkpoint, and return
+  a result that offers Reconcile for current-branch divergence.
+- [ ] Atomically publish all local-ahead and local-only branches with exact
+  leases.
+- [ ] Apply unrelated safe remote advances locally.
+- [ ] Verify complete branch parity before reporting a successful handoff.
+- [ ] Emit parent ancestry advisories without blocking continued work.
+
+Tests:
+
+- [ ] One Save publishes committed work accumulated on several branches.
+- [ ] Save can publish local work on one branch while retrieving an unrelated
+  remote advance on another.
+- [ ] Offline Save retains a local checkpoint and reports that handoff did not
+  occur.
+- [ ] A remote race rejects the complete atomic push.
+- [ ] Same-branch divergence retains the checkpoint and changes no remote ref.
+- [ ] Direct work on the remote default branch is supported.
+
+Exit gate:
+
+- [ ] Successful Commit and Save means every ordinary local and remote branch
+  name and tip matches.
+- [ ] Every unsuccessful remote handoff explicitly says that another clone must
+  not resume from the remote yet.
+
+## Phase 7: Add parent intent and optional lifecycle commands
+
+- [ ] Implement Start Branch from the current branch and record that parent.
+- [ ] Carry existing uncommitted files safely to a newly created branch.
+- [ ] For imported branches, assume remote default for advisory status and
+  confirm/persist parent intent before a parent-dependent mutation.
+- [ ] Implement the three ancestry states: current with parent, probably already
+  integrated, and parent advanced independently.
+- [ ] Implement Update from Parent using merge, never hidden rebase.
+- [ ] Implement Finish as Save, fetch/recheck, ancestry validation,
+  parent fast-forward, and a retain/delete prompt.
+- [ ] Publish Finish parent update and optional deletion atomically with exact
+  leases.
+- [ ] Switch to the parent and mirror the chosen local cleanup only after remote
+  success.
+- [ ] Implement explicit Condense with a preview, final message prompt, exact
+  leases, and recovery refs.
+- [ ] Keep Init, Get, and Commit and Save visually primary; add no default
+  keybinding for Condense.
+
+Tests:
+
+- [ ] A single user finishes branch A into main and receives a parent-advanced
+  advisory while later working on branch B.
+- [ ] Parent advisories do not block Get, Save, or continued editing.
+- [ ] Finish refuses and offers Update when the parent advanced independently.
+- [ ] Finish supports both retained and deleted branch choices.
+- [ ] Condense preserves the branch tree while replacing only branch-exclusive
+  checkpoint history.
+
+Exit gate:
+
+- [ ] The ordinary synchronization workflow still requires only Init, Get, and
+  Commit and Save.
+- [ ] Lifecycle operations never require the user to type branch-moving Git
+  commands.
+
+## Phase 8: Add divergence and guided conflict handling
+
+- [ ] Offer Reconcile only for current-branch local/remote divergence.
+- [ ] Merge the fetched remote tip into the clean locally checkpointed branch.
+- [ ] Use the same pending-operation model for Reconcile and Update conflicts.
+- [ ] Record conflicting paths and surface Continue and Abort contextually.
+- [ ] Block unrelated WipStream mutations while an operation is pending.
+- [ ] Continue only after Git reports no unresolved conflicts, then commit and
+  run Commit and Save.
+- [ ] Abort with `git merge --abort` and verify the complete recorded
+  pre-merge state.
+- [ ] If abort verification fails, retain the receipt and report exact recovery
+  state rather than claiming success.
+
+Tests:
+
+- [ ] Clean Reconcile publishes a merge containing both clones' work.
+- [ ] Conflicted Update and Reconcile expose only the relevant recovery actions.
+- [ ] Continue refuses unresolved conflicts.
+- [ ] Abort restores branch, index, worktree, and operation state exactly.
+- [ ] Restarting VS Code rediscovers and explains a pending operation.
+
+Exit gate:
+
+- [ ] No merge conflict can become an unnamed or unexplained repository state.
+
+## Phase 9: Add safe Undo
+
+- [ ] Determine whether the latest completed operation is undoable from its
+  receipt and current state.
+- [ ] Require a clean single worktree.
+- [ ] Verify exact local and remote after-values before changing anything.
+- [ ] Revert remote changes atomically with exact leases.
+- [ ] Revert local refs through expected-old-value transactions.
+- [ ] Restore the original checkout.
+- [ ] For Commit and Save, return checkpoint contents to the working directory
+  when restoring the previous branch tip.
+- [ ] Refuse without mutation when later local or remote work exists.
+- [ ] Make Undo visible only when the current receipt is eligible.
+
+Tests:
+
+- [ ] Undo covers Get, Init, Save, Finish-retain, Finish-delete, Condense, and
+  clean Update.
+- [ ] Any later local commit, working-tree edit, ref move, or remote push blocks
+  Undo.
+- [ ] Interrupted Undo remains inspectable and retryable.
+
+Exit gate:
+
+- [ ] Users can reverse the last eligible WipStream action without reflog or
+  ref-manipulation commands.
+
+## Phase 10: Implement version 1 migration
+
+- [ ] Read custom version 1 remote, main, feature, WIP, and last-known-WIP
+  settings.
+- [ ] Validate complete, synchronized `main -> feature -> WIP` topology.
+- [ ] Preview advancing feature to the WIP tip and deleting only the WIP
+  companion name.
+- [ ] Atomically update remote feature and delete remote WIP with exact leases.
+- [ ] Transactionally update local feature and delete local WIP.
+- [ ] Preserve every checkpoint commit and record main as feature's parent.
+- [ ] Handle an already-completed version 1 stream by initializing version 2
+  normally.
+- [ ] Refuse partial, divergent, rewritten-without-proof, or otherwise
+  unrecognized old state.
+- [ ] Write version 2 configuration only after migration and reconciliation
+  complete.
+- [ ] Keep legacy command handlers for one compatibility release.
+
+Tests:
+
+- [ ] Active default and custom-named streams migrate.
+- [ ] Completed streams migrate.
+- [ ] Stale second clones migrate or refuse deterministically.
+- [ ] Partial and divergent streams change nothing.
+- [ ] Migration is previewable, retry-safe, and undoable.
+
+Exit gate:
+
+- [ ] Every recognized version 1 state has a deterministic migration or
+  non-mutating refusal.
+
+## Phase 11: UI, documentation, and release verification
+
+- [ ] Rename the primary command titles while retaining their ids and keybindings.
+- [ ] Add Start and Finish as secondary Command Palette actions.
+- [ ] Surface Update, Reconcile, Continue, Abort, and Undo only in their relevant
+  contexts.
+- [ ] Mark Condense advanced and leave it without a default keybinding.
+- [ ] Make Output records include operation id, branch names, result, and safe
+  next action.
+- [ ] Update README diagrams, command documentation, recovery guidance, agent
+  guidance, and the one-worktree warning.
+- [ ] Update the live-test fixture for multiple ordinary branches and two
+  separate clones.
+- [ ] Run compile, automated integration tests, packaging validation, and the
+  isolated two-window live test.
+- [ ] Review the final diff for accidental worktree support, hidden rebase,
+  background behavior, or non-atomic remote publication.
+
+Exit gate:
+
+- [ ] The normal documented workflow contains only Init, Get, and Commit and
+  Save.
+- [ ] All automated and live acceptance tests pass.
+- [ ] The packaged VSIX exposes only the intended primary, secondary, and
+  contextual UI.
