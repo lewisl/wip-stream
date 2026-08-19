@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "commit": "aa30aa5",
+    "recordedOn": "2026-08-19",
+    "command": "npm test",
+    "result": "passed"
+  },
+  "commands": [
+    {
+      "id": "wipstream.init",
+      "title": "Initialize Stream",
+      "key": "ctrl+w i",
+      "compatibility": "Retain the id and keybinding; rename the command to Initialize Repository."
+    },
+    {
+      "id": "wipstream.resume",
+      "title": "Get Current from Remote",
+      "key": "ctrl+w g",
+      "compatibility": "Retain the id and keybinding; rename the command to Get from Remote."
+    },
+    {
+      "id": "wipstream.saveup",
+      "title": "Save to Remote",
+      "key": "ctrl+w s",
+      "compatibility": "Retain the id and keybinding; rename the command to Commit and Save."
+    },
+    {
+      "id": "wipstream.tofeature",
+      "title": "To Feature",
+      "key": "ctrl+w f",
+      "compatibility": "Keep as a one-release legacy handler that explains the removed accepted/WIP distinction and performs no implicit rewrite."
+    },
+    {
+      "id": "wipstream.tomain",
+      "title": "To Main",
+      "key": "ctrl+w m",
+      "compatibility": "Keep as a one-release legacy handler that delegates to Finish Branch after migration."
+    }
+  ],
+  "resultTypes": {
+    "InitializeResult": ["created", "attached", "current"],
+    "ResumeResult": ["resumed", "current", "completed"],
+    "FinishResult": ["finished", "already-finished"],
+    "SyncFailure": ["offline", "remote-changed"]
+  },
+  "otherResults": {
+    "saveUp": [
+      "checkpoint-created-and-published",
+      "nothing-to-checkpoint-and-published",
+      "checkpoint-created-but-not-published",
+      "nothing-to-checkpoint-and-not-published",
+      "confirmed-WIP-history-rewrite"
+    ],
+    "toFeature": [true, false]
+  },
+  "errorCodes": [
+    { "code": "BARE_REPOSITORY", "compatibility": "Retain as a repository preflight refusal." },
+    { "code": "CANCELLED", "compatibility": "Retain as the common no-mutation user-cancellation result." },
+    { "code": "CONFLICTING_LOCAL_STREAM", "compatibility": "Use only while diagnosing or migrating a version 1 stream." },
+    { "code": "DIRTY_SUBMODULES", "compatibility": "Retain as a Commit and Save preflight refusal." },
+    { "code": "DIRTY_WORKTREE", "compatibility": "Retain for operations that require a clean worktree." },
+    { "code": "GIT_OPERATION_IN_PROGRESS", "compatibility": "Retain as a repository preflight refusal." },
+    { "code": "INVALID_BRANCH_NAME", "compatibility": "Retain for branch and migration input validation." },
+    { "code": "INVALID_BRANCH_NAMES", "compatibility": "Use only while diagnosing or migrating a version 1 stream." },
+    { "code": "INVALID_INPUT", "compatibility": "Retain for rejected command input." },
+    { "code": "INVALID_TOPOLOGY", "compatibility": "Use for version 1 migration; version 2 reports the specific unsafe branch relation." },
+    { "code": "LOCAL_AHEAD", "compatibility": "Use for version 1 migration; version 2 Get reports the blocking branch inventory." },
+    { "code": "LOCAL_BRANCH_MISSING", "compatibility": "Use for version 1 migration; version 2 inventory represents missing sides explicitly." },
+    { "code": "LOCAL_CLEANUP_UNSAFE", "compatibility": "Use only while diagnosing or migrating a completed version 1 stream." },
+    { "code": "LOCAL_DIVERGED", "compatibility": "Retain the divergence meaning and route version 2 users to Reconcile." },
+    { "code": "LOCAL_MAIN_AHEAD", "compatibility": "Use for version 1 migration; version 2 treats the default branch like every ordinary branch." },
+    { "code": "LOCAL_MAIN_DIVERGED", "compatibility": "Use for version 1 migration; version 2 reports ordinary-branch divergence." },
+    { "code": "LOCAL_UNFINISHED_WORK", "compatibility": "Retain the no-overwrite guarantee during version 1 completed-stream migration." },
+    { "code": "NOT_INITIALIZED", "compatibility": "Retain and route the user to Initialize Repository." },
+    { "code": "NOT_SYNCED", "compatibility": "Retain for legacy handlers that require a completed handoff." },
+    { "code": "NO_REPOSITORY", "compatibility": "Retain as a command-selection refusal." },
+    { "code": "PARTIAL_LOCAL_STREAM", "compatibility": "Use only while diagnosing or migrating a version 1 stream." },
+    { "code": "PARTIAL_REMOTE_STREAM", "compatibility": "Use only while diagnosing or migrating a version 1 stream." },
+    { "code": "REMOTE_MAIN_MISSING", "compatibility": "Replace after migration with remote-default-branch validation." },
+    { "code": "REMOTE_MISSING", "compatibility": "Retain as remote validation." },
+    { "code": "REMOTE_NOT_CURRENT", "compatibility": "Use for version 1 migration; version 2 reports the exact branch relation and action." },
+    { "code": "REMOTE_WIP_CHANGED", "compatibility": "Use only while diagnosing or migrating version 1 WIP rewrites." },
+    { "code": "SAVE_FAILED", "compatibility": "Retain when a VS Code document cannot be saved." },
+    { "code": "SHALLOW_REPOSITORY", "compatibility": "Retain as a repository preflight refusal." },
+    { "code": "STREAM_NOT_PUBLISHED", "compatibility": "Use for version 1 migration; version 2 records the failed operation phase." },
+    { "code": "UNACCEPTED_WIP", "compatibility": "Use only while diagnosing or migrating the version 1 accepted/WIP split." },
+    { "code": "UNRESOLVED_CONFLICTS", "compatibility": "Retain and integrate with Continue or Abort when WipStream owns the merge." },
+    { "code": "UNSAVED_EDITOR_WORK", "compatibility": "Retain before operations that may replace working-tree files." },
+    { "code": "WIP_REWRITE_CONFIRMATION_REQUIRED", "compatibility": "Use only for version 1 WIP rewrites; version 2 Condense is always explicit." },
+    { "code": "WRONG_BRANCH", "compatibility": "Use only for version 1 migration; version 2 Commit and Save supports the checked-out ordinary branch." }
+  ],
+  "fixtures": [
+    { "name": "active-stream", "test": "test/workflow.test.js" },
+    { "name": "completed-stream", "test": "test/workflow.test.js" },
+    { "name": "stale-clone", "test": "test/workflow.test.js" },
+    { "name": "wip-rewrite", "test": "test/workflow.test.js" },
+    { "name": "partial-local-stream", "test": "test/v1-characterization.test.js" },
+    { "name": "partial-remote-stream", "test": "test/v1-characterization.test.js" },
+    { "name": "divergent-temporary-branch", "test": "test/v1-characterization.test.js" },
+    { "name": "local-ahead-temporary-branch", "test": "test/v1-characterization.test.js" },
+    { "name": "completed-remote-with-local-work", "test": "test/v1-characterization.test.js" },
+    { "name": "commit-hook-rejection", "test": "test/workflow.test.js" },
+    { "name": "dirty-submodule", "test": "test/workflow.test.js" },
+    { "name": "cancelled-message", "test": "test/workflow.test.js" },
+    { "name": "untracked-file", "test": "test/workflow.test.js" },
+    { "name": "two-clone-handoff", "test": "test/workflow.test.js" }
+  ]
+}

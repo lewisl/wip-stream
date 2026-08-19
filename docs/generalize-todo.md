@@ -7,19 +7,19 @@ and Save.
 
 ## Phase 0: Preserve the version 1 baseline
 
-- [ ] Run and record the current automated workflow test result before changing
+- [x] Run and record the current automated workflow test result before changing
   source.
-- [ ] Add missing characterization tests for every current command result and
+- [x] Add missing characterization tests for every current command result and
   failure code that migration or compatibility code will depend on.
-- [ ] Capture fixtures for an active stream, a completed stream, a stale clone,
+- [x] Capture fixtures for an active stream, a completed stream, a stale clone,
   a WIP rewrite, partial temporary branches, and divergent temporary branches.
-- [ ] Confirm existing commit-hook, dirty-submodule, cancelled-message,
+- [x] Confirm existing commit-hook, dirty-submodule, cancelled-message,
   untracked-file, and two-clone behaviors remain represented.
 
 Exit gate:
 
-- [ ] The unchanged version 1 implementation passes all characterization tests.
-- [ ] Every existing public command id has an explicit compatibility expectation.
+- [x] The unchanged version 1 implementation passes all characterization tests.
+- [x] Every existing public command id has an explicit compatibility expectation.
 
 ## Phase 1: Introduce the version 2 repository model
 
