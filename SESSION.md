@@ -2,9 +2,14 @@
 
 ## Current state
 
-- The five WipStream commands are implemented: Initialize Stream, Get Current from Remote, Save to Remote, To Feature, and To Main.
-- Save to Remote stages all committable changes, including untracked files, and prompts for an optional custom checkpoint message only when it will create a commit. To Feature uses that same save step; To Main creates no commit.
-- Save to Remote rejects unresolved Git operations or conflicts and dirty submodules. A rejected Git commit hook leaves the staged changes available to fix and retry.
+- The normal command surface is Initialize Repository, Get from Remote, and
+  Commit and Save. Optional lifecycle, conflict recovery, and exact-state Undo
+  commands are contextual.
+- Commit and Save stages all committable changes, including untracked files,
+  and prompts for a checkpoint message only when it will create a commit.
+- Commit and Save rejects unresolved Git operations or conflicts and dirty
+  submodules. A rejected Git commit hook leaves staged changes available to fix
+  and retry.
 - The extension uses explicit commands only; it has no background auto-commit, pull, or push behavior.
 - Automated workflow and version 1 characterization tests pass, including
   command/result/error compatibility, two-computer synchronization, unsafe
@@ -17,7 +22,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 9 are complete. The recorded baseline is in
+- Phases 0 through 10 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -60,9 +65,16 @@
   verifies complete local/configuration/remote after-state, reverses remote
   refs with exact leases and local refs transactionally, restores checkout and
   configuration, and returns Save checkpoint contents to the working tree.
+- `src/migration-workflow.ts` provides previewed, exact-leased, transactional,
+  undoable migration for synchronized active and safely completed version 1
+  streams, including deterministic retry after a successful remote boundary.
+- `src/commands.ts` exposes the generalized workflows with contextual command
+  visibility and operation-aware Output records while retaining the five
+  version 1 command ids for one compatibility release.
 - TypeScript now explicitly targets ES2020 with Node module resolution and
   Node/VS Code ambient types, matching the declared VS Code runtime and
   resolving editor diagnostics for modern array/string methods and Node
   built-in modules.
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 10 by implementing deterministic version 1 migration.
+- Phase 11 is complete: automated tests, VSIX packaging, packaged-manifest
+  inspection, and the isolated two-window live acceptance test all pass.

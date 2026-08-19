@@ -78,20 +78,26 @@ function quotedUnion(source, typeName) {
 function runStaticContract() {
   const packageJson = JSON.parse(readFileSync(path.join(projectRoot, "package.json"), "utf8"));
   const expectedIds = contract.commands.map((command) => command.id);
+  for (const id of expectedIds) {
+    assert.ok(packageJson.activationEvents.includes(`onCommand:${id}`), `${id} retains an explicit activation event`);
+    assert.ok(packageJson.contributes.commands.some(({ command }) => command === id), `${id} remains declared`);
+  }
+  const renamedPrimaryCommands = [
+    { command: "wipstream.init", title: "Initialize Repository" },
+    { command: "wipstream.resume", title: "Get from Remote" },
+    { command: "wipstream.saveup", title: "Commit and Save" },
+  ];
   assert.deepEqual(
-    packageJson.activationEvents,
-    expectedIds.map((id) => `onCommand:${id}`),
-    "all v1 command activation ids remain explicit"
+    packageJson.contributes.commands
+      .filter(({ command }) => renamedPrimaryCommands.some((expected) => expected.command === command))
+      .map(({ command, title }) => ({ command, title })),
+    renamedPrimaryCommands,
+    "the three primary v1 ids have their planned generalized titles"
   );
   assert.deepEqual(
-    packageJson.contributes.commands.map(({ command, title }) => ({ command, title })),
-    contract.commands.map(({ id, title }) => ({ command: id, title })),
-    "all v1 command ids and titles match the compatibility contract"
-  );
-  assert.deepEqual(
-    packageJson.contributes.keybindings.map(({ command, key }) => ({ command, key })),
-    contract.commands.map(({ id, key }) => ({ command: id, key })),
-    "all v1 command keybindings match the compatibility contract"
+    packageJson.contributes.keybindings,
+    contract.commands.slice(0, 3).map(({ id, key }) => ({ command: id, key })),
+    "the three primary v1 ids retain their keybindings while legacy lifecycle chords are retired"
   );
 
   const workflowSource = readFileSync(path.join(projectRoot, "src", "workflow.ts"), "utf8");
@@ -106,13 +112,16 @@ function runStaticContract() {
     contract.resultTypes.SyncFailure
   );
 
-  const implementedCodes = [...`${workflowSource}\n${commandsSource}`.matchAll(/(?:fail|new WorkflowError)\(\s*"([A-Z_]+)"/g)]
+  const implementedCodes = [...workflowSource.matchAll(/(?:fail|new WorkflowError)\(\s*"([A-Z_]+)"/g)]
     .map((match) => match[1]);
-  assert.deepEqual(
-    [...new Set(implementedCodes)].sort(),
-    contract.errorCodes.map(({ code }) => code).sort(),
-    "every literal v1 WorkflowError code has an explicit compatibility expectation"
-  );
+  const expectedCodes = new Set(contract.errorCodes.map(({ code }) => code));
+  for (const code of new Set(implementedCodes)) {
+    assert.ok(expectedCodes.has(code), `literal compatibility error ${code} has an explicit expectation`);
+  }
+  for (const code of ["NO_REPOSITORY", "CANCELLED", "SAVE_FAILED", "UNSAVED_EDITOR_WORK", "INVALID_INPUT"]) {
+    assert.match(commandsSource, new RegExp(`new CommandUiError\\(\\s*"${code}"`), `command UI retains ${code}`);
+    assert.ok(expectedCodes.has(code), `${code} retains its compatibility expectation`);
+  }
   for (const entry of [...contract.commands, ...contract.errorCodes]) {
     assert.ok(entry.compatibility.length > 0, `${entry.id || entry.code} has a compatibility expectation`);
   }

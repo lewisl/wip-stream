@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Generalized WipStream from a fixed main/feature/WIP stream to every ordinary
+  Git branch while keeping Initialize, Get, and Commit and Save as the normal
+  three-command workflow.
+- Added transactional multi-branch synchronization, exact remote leases,
+  operation receipts, recovery refs, parent-aware lifecycle commands, guided
+  merge conflict recovery, and exact-state Undo.
+- Added previewed, undoable version 1 migration that preserves every checkpoint
+  commit and refuses partial, divergent, or unproven legacy state.
+- Enforced exactly one Git worktree while continuing to support separate clones
+  on multiple computers.
+
 ## 0.1.8
 
 - Added keyboard shortcuts for every WipStream command: use the `Ctrl+W` chord followed by `I`, `G`, `S`, `F`, or `M`.

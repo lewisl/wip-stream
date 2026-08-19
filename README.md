@@ -1,132 +1,206 @@
 # WipStream
 
-WipStream is a VS Code extension for one person who works on a project using multiple computers. It uses the remote Git repository—not filesystem synchronization such as Dropbox or Syncthing—to synchronize changes across computers. This is safer for syncing both the working set in files and the local .git repo directory. 
+WipStream is a VS Code extension for one person who works on a Git repository
+from more than one computer. It provides goal-oriented commands for safe Git
+handoff without hiding branch state or inventing a parallel revision system.
 
-WipStream is currently distributed as a `.vsix`; it is not published on the VS Code Marketplace.
+WipStream is currently distributed as a `.vsix`; it is not published on the
+VS Code Marketplace.
 
-## Model and Command Overview
+## The model
 
-The repository will have three branches:
+Version 2 supports every ordinary Git branch. A typical repository might look
+like this:
 
 ```text
-main ───── feature ───── wip/feature
+main ────────────────●──────────────●
+  ├─ change/search ──●──●
+  └─ change/export ──●────●
 ```
 
-- `main` contains completed work.
-- `feature` is work on changes that you commit as the feature history.
-- `wip/feature` is new work-in-process you are doing for the feature.  
-  
-`Save to Remote` creates a commit on the wip/feature branch and pushes it to remote so that you can access it from other computers where you also work on the repo. Once `Save to Remote` reports success, the remote is the authoritative state that another computer may download using the current from.
+There are no managed WIP companion branches. The checked-out branch is the
+branch being edited, and **Commit and Save** checkpoints that branch while also
+reconciling every other safe local or remote branch.
 
-`To Feature` extends the `feature` branch to the latest `wip/feature` commit. No squash, rebase, merge, or force-push is necessary. If some WIP commits should be hidden, squash them manually before you run the `To Feature` command. WipStream recognizes a rewritten WIP history and asks before replacing the remote WIP checkpoints; it refuses if another machine has changed the stream since this machine’s last successful handoff.
+WipStream assumes one person, several separate clones, and one active editing
+clone at a time. It detects remote changes made by another person or tool, but
+it is not a team workflow, pull-request manager, or deployment system.
 
-`Get Current from Remote` is the first command you must run on another computer before you edit anything in the project. This command pulls all changes on all of the branches to this computer.  Do not edit anything in the project until you do this first!
+## Normal use: three commands
 
-WipStream is designed for one active editing machine at a time and for one person. It is *not* team version management. 
+### Initialize Repository (`wipstream.init`)
+
+Run this once in each clone. Initialize validates a complete non-bare clone,
+the selected remote and its default branch, full branch fetch coverage, atomic
+push support, a clean working tree, and exactly one worktree. It then safely
+reconciles every ordinary local and remote branch in both directions and checks
+out the remote default branch.
+
+If the repository contains version 1 WipStream configuration, Initialize shows
+a migration preview and asks before changing ordinary refs.
+
+### Get from Remote (`wipstream.resume`)
+
+Run this before editing when returning to a clone. Get fetches and prunes every
+remote branch, then applies all safe local updates as one expected-state
+transaction. It preserves the current checkout unless that branch was safely
+deleted remotely, in which case it selects the recorded parent or remote
+default branch.
+
+Get refuses local-only commits, local advances, divergence, ambiguous deletion,
+dirty files, conflicts, active Git operations, or additional worktrees. A
+refusal may refresh remote-tracking refs, but it does not move an ordinary local
+branch or replace working files.
+
+### Commit and Save (`wipstream.saveup`)
+
+Run this to hand work to the remote:
+
+1. Save file-backed VS Code documents in the selected repository.
+2. Stage all non-ignored additions, modifications, and deletions.
+3. If content changed, ask for a checkpoint message and commit it on the
+   checked-out branch.
+4. Fetch and classify every branch.
+5. Atomically publish all safe local advances with exact leases and apply safe,
+   unrelated remote advances locally.
+
+A successful result means every ordinary local branch name and tip equals the
+remote. An unsuccessful handoff retains the local checkpoint and explicitly
+warns not to resume from another clone. Git commit hooks are honored, and dirty
+submodules are refused.
+
+## A multi-computer session
+
+1. On computer A, run **Get from Remote**, edit, then run **Commit and Save**.
+2. Wait for the successful remote-handoff message.
+3. On computer B, run **Get from Remote** before editing.
+4. Check out the branch you intend to continue using VS Code's normal Git
+   branch picker if it is not already checked out.
+5. Edit and run **Commit and Save** again.
+
+Several branches may exist and be consulted in the clone, but only the one
+checked-out branch supplies the working directory being edited.
+
+Switching computers never requires **Finish Branch**. After Commit and Save
+reports a successful handoff, the second computer may close VS Code; the first
+computer can later Get from Remote and continue the same branch with those
+changes intact. Finish is only for deliberately completing the branch into its
+parent.
+
+## Optional branch lifecycle
+
+- **Start Branch** creates a normal branch from the current branch, records
+  that parent intent, and carries existing uncommitted files without committing
+  them.
+- **Update from Parent** retrieves current remote state and merges the recorded
+  or confirmed parent. It never performs a hidden rebase.
+- **Finish Branch** first saves, verifies ancestry, fast-forwards the parent,
+  and asks whether to retain or delete the completed branch.
+- **Condense Branch (Advanced)** explicitly replaces two or more
+  branch-exclusive checkpoint commits with one tree-equivalent commit after a
+  preview and confirmation. It has no default keybinding.
+
+Parent changes discovered during Get or Save are advisories. Work can continue;
+Update is required only before an ancestry-dependent action such as Finish when
+the parent advanced independently.
+
+## Conflict recovery and Undo
+
+**Reconcile with Remote** is offered only when the checked-out branch has true
+local/remote divergence. It merges the fetched remote tip into the local
+checkpointed branch. If Reconcile or Update conflicts, WipStream records the
+paths and exposes only **Continue Pending Merge** and **Abort Pending Merge**.
+Abort verifies the complete restored branch, index, worktree, and Git-operation
+state before claiming success.
+
+**Undo Last Action** is shown only for the latest eligible WipStream operation.
+It requires a clean single worktree and the exact recorded local,
+configuration, checkout, and remote after-state. It reverses remote refs with
+exact leases and local refs transactionally. Any later edit, commit, branch
+move, or remote change blocks Undo rather than guessing.
+
+Human-readable receipts and recovery refs live in private Git metadata under
+`.git`; they are never tracked project files.
+
+## Version 1 migration
+
+An active version 1 repository has configured `main -> feature -> WIP` branch
+ancestry. Migration:
+
+- requires all three local tips to equal their fetched remote tips;
+- requires the remote WIP tip to equal this clone's last successful handoff;
+- advances the feature name to the existing WIP tip, preserving every commit;
+- deletes only the redundant WIP companion name locally and remotely;
+- records main as the feature parent; and
+- writes version 2 configuration only after complete branch reconciliation.
+
+Completed streams, including a safely stale clone whose temporary tips are
+already contained in completed remote main, convert without recreating those
+temporary branches. Partial, divergent, rewritten-without-proof, or otherwise
+unrecognized states refuse before changing ordinary refs or configuration.
+
+For the one realistic version 1 repository, use this controlled rehearsal while
+no other clone is active:
+
+1. Make sure the version 1 Save to Remote handoff succeeded and the worktree is
+   clean.
+2. Install the new extension and run **Initialize Repository**.
+3. Read the migration preview, approve it, and verify the files and branches.
+4. Before making any later change, run **Undo Last Action**.
+5. Verify the version 1 feature and WIP names, tips, configuration, and WIP
+   checkout returned.
+6. Run **Initialize Repository** again and approve the final migration.
+
+Undoing migration changes only refs and local WipStream configuration back to
+their exact recorded values; it does not reverse or recreate commit contents.
+
+## One-worktree rule
+
+WipStream supports multiple separate clones and rejects repositories with
+linked Git worktrees. It never runs `git worktree add`, `move`, `repair`,
+`prune`, `unlock`, or `remove`.
+
+Use a separate ordinary branch for separate work. Only one branch is checked
+out in a clone at a time. This keeps the working directory, index, checkout,
+and command receipts in one comprehensible state. AI agents working in this
+repository must follow the same rule: create or use a branch in the existing
+clone, never create a second worktree as a sandbox.
+
+## Commands and keyboard shortcuts
+
+The normal commands keep their original IDs and chords:
+
+| Command | ID | Key |
+| --- | --- | --- |
+| Initialize Repository | `wipstream.init` | `Ctrl+W`, then `I` |
+| Get from Remote | `wipstream.resume` | `Ctrl+W`, then `G` |
+| Commit and Save | `wipstream.saveup` | `Ctrl+W`, then `S` |
+
+Start and Finish are ordinary Command Palette actions. Update, Reconcile,
+Continue, Abort, and Undo appear only when relevant. Condense is advanced and
+has no default chord. The old `wipstream.tofeature` and `wipstream.tomain` IDs
+remain callable for one compatibility release but are hidden from normal UI;
+they perform no implicit history rewrite or migration.
 
 ## Prerequisites
 
-- A normal, complete Git working clone with a reachable remote (default `origin`).
-- Permission to create, update, and delete the configured temporary branches, and to fast-forward the configured main branch.
-- A remote that supports Git atomic pushes. WipStream validates these pre-requisites during initialization.
-- Git commit hooks are honored. If a hook rejects a checkpoint, it is not committed or pushed; Git leaves the changes staged so you can fix the problem and retry.
+- A normal, complete Git clone with a reachable remote (default `origin`).
+- A remote with a valid symbolic default branch and atomic-push support.
+- Permission to create, update, and delete ordinary branches.
+- Exactly one worktree for the repository.
 
-The default branch names are `origin`, `main`, `feature`, and `wip/feature`. Initialization offers these names and stores the chosen values in that clone’s `.git/config` under `wipstream.*`. Other branches are never touched.
-
-## Commands
-
-### WipStream: Initialize Stream (`wipstream:init`)
-
-Use this once per clone for a feature stream. It saves buffers, requires a clean repository, fetches the remote, and either:
-
-- creates and atomically publishes `feature` and `wip/feature` from `main`, or
-- attaches the clone to an existing valid stream.
-
-It then runs **Get Current from Remote** automatically and so that you can start an editing session on `wip/feature`. Its Output message confirms this and reminds you that before every subsequent editing session on any of your computers you must run **Get Current from Remote** yourself. 
-
-### WipStream: Get Current from Remote (`wipstream:resume`)
-
-Use this to start a session, especially after moving to another computer. It refuses to overwrite dirty buffers, uncommitted files, local-only commits, divergent branches, conflicts, or an active Git operation. After fetching and validating all branches, it safely updates the local clone on the machine and checks out `wip/feature`.
-
-If another computer has already completed the feature, **Get Current from Remote** instead fast-forwards this clone’s `main`, removes only stale temporary branches already contained in that `main`, and leaves `main` checked out. It then tells you to run **Initialize Stream** when ready to start the next feature.
-
-#### To use a second computer:
-
-1. Clone the same remote normally using git--WipStream does *not* do this for you.
-2. Open the clone in VS Code.
-3. Run **Initialize Stream** to attach it and start the first session.
-4. Before every later editing session, run **Get Current from Remote** before editing.
-
-### WipStream: Save to Remote (`wipstream:saveup`)
-
-This command commits and saves the current work to the remote:
-
-1. Saves file-backed VS Code documents in the selected repository.
-2. Requires `wip/feature` to be checked out.
-3. Stages all changes, including new and deleted files.
-4. When content has changed, prompts for a checkpoint commit message prefilled with a timestamped WIP message. Accept the default or replace it; then creates one checkpoint.
-5. Atomically pushes `main`, `feature`, and `wip/feature` to the remote.
-
-Files excluded by `.gitignore` and empty directories are not committed. If a submodule has uncommitted changes, commit or discard them within that submodule before saving the parent repository.
-
-It reports whether the checkpoint is synced, whether there were no committable changes, whether work is local-only because the network is unavailable, or whether the remote changed. Do not move to another machine until it reports a successful sync.
-
-### WipStream: To Feature (`wipstream:tofeature`)
-
-First performs **Save to Remote**, including its checkpoint-message prompt when content has changed. Only after that successful handoff, it advances `feature` to `wip/feature` and atomically publishes the result. It is safe to repeat.
-
-### WipStream: To Main (`wipstream:tomain`)
-
-This is the commmand that completes the feature work and includes it in main.
-
-Saves VS Code documents, then requires a clean working tree and exactly matching `feature` plus `wip/feature` refs. If WIP remains unaccepted, run **To Feature** first.
-
-Fetches and rechecks the remote, fast-forwards `main` to `feature`, then atomically publishes `main` while deleting remote `feature` and `wip/feature`. After the remote succeeds, it deletes the local temporary branches and leaves `main` checked out.
-
-## Keyboard Shortcuts
-
-WipStream commands use a two-step chord: press `Ctrl+W`, release it, then press the command key.
-
-| Command | Key |
-| --- | --- |
-| Initialize Stream | `Ctrl+W`, then `I` |
-| Get Current from Remote | `Ctrl+W`, then `G` |
-| Save to Remote | `Ctrl+W`, then `S` |
-| To Feature | `Ctrl+W`, then `F` |
-| To Main | `Ctrl+W`, then `M` |
-
-## Recovery
-
-**Get Current from Remote** intentionally refuses unexpected local work instead of guessing how to merge it. Either discard that work deliberately, or preserve it on a rescue branch:
-
-```bash
-git switch -c rescue/<timestamp>
-git add --all
-git commit -m "Rescue unexpected local work"
-git push -u origin rescue/<timestamp> # strongly recommended
-```
-
-Then get current from WipStream normally and manually cherry-pick the rescue commits into `wip/feature` or `feature`. Resolve conflicts deliberately and run **Save to Remote** afterward.
+Files excluded by `.gitignore` and empty directories are not committed.
 
 ## Install from a VSIX
 
-WipStream is not yet published on the VS Code Marketplace. To install it, download the provided `.vsix` file, then in VS Code:
-
-1. Open the Command Palette.
-2. Run **Extensions: Install from VSIX...**.
-3. Select the downloaded `.vsix` file.
-
-Alternatively, from a terminal with the VS Code `code` command available:
+Download the `.vsix`, run **Extensions: Install from VSIX...** from the Command
+Palette, and select the file. Or use:
 
 ```bash
 code --install-extension /path/to/lewisl.wipstream-<version>.vsix
 ```
 
-Reload VS Code if prompted.
-
 ## Development
-
-Building a `.vsix` with npm is only needed when developing or testing WipStream locally:
 
 ```bash
 npm install
@@ -135,16 +209,11 @@ npm run package
 code --install-extension dist/lewisl.wipstream-0.1.8.vsix --force
 ```
 
-Increment `version` in `package.json` for meaningful local test builds so installed versions are obvious.
+`npm test` uses disposable local bare remotes and clones; it never contacts a
+network service. `npm run test:live` packages the extension, creates an isolated
+two-clone fixture and VS Code profile, and prints verification and cleanup
+commands.
 
-`npm test` creates disposable local bare remotes and clones; it never contacts a network service.
-
-For a manual live-extension test that never restarts or changes the VS Code instance running Codex, run:
-
-```bash
-npm run test:live
-```
-
-It packages the extension, creates a disposable bare remote plus two clones, installs the VSIX into a temporary VS Code user-data and extensions directory, and opens one isolated VS Code window per clone. Follow `LIVE_TEST.md` in those windows, then run the verification command printed by the launcher. The fixture is retained until you explicitly remove it with the printed cleanup command.
-
-Each command writes a durable start, success, or error record to VS Code’s **WipStream** Output channel and opens that panel when it completes. WipStream also requests a normal information/error notification, but the Output channel is the reliable command record.
+Every command writes its operation id, affected branches, result, and safe next
+action to the **WipStream** Output channel. The extension has no background
+commit, merge, pull, push, or branch mutation.

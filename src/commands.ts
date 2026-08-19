@@ -1,37 +1,82 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { EXTENSION_NAME } from "./constants";
+import {
+  abortPendingMerge,
+  continuePendingMerge,
+  inspectPendingMerge,
+  reconcileWithRemote,
+} from "./conflict-workflow";
+import {
+  CommitAndSaveHooks,
+  CommitAndSaveResult,
+  ParentAdvisory,
+  commitAndSave,
+  getFromRemote,
+  initializeRepository,
+} from "./generalized-workflow";
 import { GitRepository } from "./git";
 import {
-  defaultsFor,
-  FinishResult,
-  initialize,
-  resume,
-  saveUp,
-  StreamConfigInput,
-  SyncResult,
-  toFeature,
-  toMain,
-  WipRewriteConfirmation,
-  WorkflowError,
-} from "./workflow";
+  CondensePreview,
+  FinishBranchDisposition,
+  condenseBranch,
+  finishBranch,
+  startBranch,
+  updateFromParent,
+} from "./lifecycle-workflow";
+import { Version1MigrationPreview } from "./migration-workflow";
+import {
+  getBranchParent,
+  readRepositoryConfiguration,
+  resolveRemoteDefaultBranch,
+} from "./repository-model";
+import { inspectUndoEligibility, undoLastAction } from "./undo-workflow";
+
+const CONTEXT_KEYS = [
+  "wipstream.version2",
+  "wipstream.finishAvailable",
+  "wipstream.updateAvailable",
+  "wipstream.reconcileAvailable",
+  "wipstream.pendingMerge",
+  "wipstream.undoAvailable",
+  "wipstream.condenseAvailable",
+] as const;
+
+class CommandUiError extends Error {
+  public readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "CommandUiError";
+    this.code = code;
+  }
+}
 
 function isWithin(root: string, file: string): boolean {
   const relative = path.relative(root, file);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+function operationDetail(operationId: string | undefined): string {
+  return operationId ? ` operation=${operationId}` : "";
+}
+
+function branchList(branches: readonly string[]): string {
+  return branches.length ? branches.join(", ") : "none";
+}
+
 async function repositoryCandidates(): Promise<GitRepository[]> {
   const candidates = new Map<string, GitRepository>();
   const activeUri = vscode.window.activeTextEditor?.document.uri;
   const paths: string[] = [];
-
-  if (activeUri?.scheme === "file") {
-    paths.push(path.dirname(activeUri.fsPath));
-  }
-  for (const folder of vscode.workspace.workspaceFolders || []) {
-    paths.push(folder.uri.fsPath);
-  }
+  if (activeUri?.scheme === "file") paths.push(path.dirname(activeUri.fsPath));
+  for (const folder of vscode.workspace.workspaceFolders || []) paths.push(folder.uri.fsPath);
 
   for (const candidate of paths) {
     try {
@@ -41,26 +86,26 @@ async function repositoryCandidates(): Promise<GitRepository[]> {
       // A workspace folder need not itself be a Git repository.
     }
   }
-
   return [...candidates.values()];
 }
+
+let activeRepository: GitRepository | undefined;
 
 async function selectRepository(): Promise<GitRepository> {
   const candidates = await repositoryCandidates();
   if (candidates.length === 0) {
-    throw new WorkflowError("NO_REPOSITORY", "No Git repository is available for the active editor or workspace.");
+    throw new CommandUiError("NO_REPOSITORY", "No Git repository is available for the active editor or workspace.");
   }
   if (candidates.length === 1) {
+    activeRepository = candidates[0];
     return candidates[0];
   }
-
   const choice = await vscode.window.showQuickPick(
     candidates.map((repo) => ({ label: path.basename(repo.root), description: repo.root, repo })),
     { placeHolder: "Choose the repository WipStream should use" }
   );
-  if (!choice) {
-    throw new WorkflowError("CANCELLED", "WipStream command cancelled.");
-  }
+  if (!choice) throw new CommandUiError("CANCELLED", "WipStream command cancelled.");
+  activeRepository = choice.repo;
   return choice.repo;
 }
 
@@ -73,7 +118,10 @@ function repositoryDocuments(repo: GitRepository): vscode.TextDocument[] {
 async function saveRepositoryDocuments(repo: GitRepository): Promise<void> {
   for (const document of repositoryDocuments(repo)) {
     if (document.isDirty && !(await document.save())) {
-      throw new WorkflowError("SAVE_FAILED", `VS Code could not save ${path.relative(repo.root, document.uri.fsPath)}.`);
+      throw new CommandUiError(
+        "SAVE_FAILED",
+        `VS Code could not save ${path.relative(repo.root, document.uri.fsPath)}.`
+      );
     }
   }
 }
@@ -81,92 +129,136 @@ async function saveRepositoryDocuments(repo: GitRepository): Promise<void> {
 function assertNoDirtyDocuments(repo: GitRepository): void {
   const dirty = repositoryDocuments(repo).find((document) => document.isDirty);
   if (dirty) {
-    throw new WorkflowError(
+    throw new CommandUiError(
       "UNSAVED_EDITOR_WORK",
-      `Unsaved editor work exists in ${path.relative(repo.root, dirty.uri.fsPath)}. Save, preserve, or discard it before resuming.`
+      `Unsaved editor work exists in ${path.relative(repo.root, dirty.uri.fsPath)}. Save it before retrieving remote files.`
     );
   }
 }
 
 async function askValue(prompt: string, value: string): Promise<string> {
   const result = await vscode.window.showInputBox({ prompt, value, ignoreFocusOut: true });
-  if (result === undefined) {
-    throw new WorkflowError("CANCELLED", "WipStream command cancelled.");
-  }
-  if (!result.trim()) {
-    throw new WorkflowError("INVALID_INPUT", "WipStream names cannot be blank.");
-  }
+  if (result === undefined) throw new CommandUiError("CANCELLED", "WipStream command cancelled.");
+  if (!result.trim()) throw new CommandUiError("INVALID_INPUT", "WipStream names cannot be blank.");
   return result.trim();
 }
 
 async function promptForCheckpointMessage(defaultMessage: string): Promise<string> {
-  const result = await vscode.window.showInputBox({
-    prompt: "Checkpoint commit message",
-    value: defaultMessage,
-    ignoreFocusOut: true,
-  });
-  if (result === undefined) {
-    throw new WorkflowError("CANCELLED", "WipStream command cancelled.");
-  }
-  if (!result.trim()) {
-    throw new WorkflowError("INVALID_INPUT", "Checkpoint commit messages cannot be blank.");
-  }
-  return result.trim();
+  return askValue("Checkpoint commit message", defaultMessage);
 }
 
-async function promptForConfig(repo: GitRepository): Promise<StreamConfigInput> {
-  const defaults = await defaultsFor(repo);
+async function selectParent(assumedParent: string): Promise<string | undefined> {
+  return askValue("Confirm or replace the parent branch", assumedParent);
+}
+
+async function chooseFinishDisposition(): Promise<FinishBranchDisposition | undefined> {
+  const choice = await vscode.window.showWarningMessage(
+    "Finish will advance the parent to this branch. Retain the completed branch name or delete it locally and remotely?",
+    { modal: true },
+    "Retain Branch",
+    "Delete Branch"
+  );
+  return choice === "Retain Branch" ? "retain" : choice === "Delete Branch" ? "delete" : undefined;
+}
+
+function saveHooks(repo: GitRepository): CommitAndSaveHooks {
   return {
-    remote: await askValue("Git remote", defaults.remote),
-    mainBranch: await askValue("Completed-work branch", defaults.mainBranch),
-    featureBranch: await askValue("Accepted-feature branch", defaults.featureBranch),
-    wipBranch: await askValue("Active WIP branch", defaults.wipBranch),
+    saveDocuments: () => saveRepositoryDocuments(repo),
+    requestCheckpointMessage: promptForCheckpointMessage,
   };
 }
 
-function syncMessage(result: SyncResult): string {
-  if (result.published) {
-    if (result.wipHistoryRewritten) {
-      return result.checkpointCreated ? "Rewritten WIP history saved and synced." : "Rewritten WIP history synced.";
-    }
-    return result.checkpointCreated ? "WIP checkpoint saved and synced." : "No committable changes; managed branches are synced.";
+function appendAdvisories(output: vscode.OutputChannel, advisories: readonly ParentAdvisory[]): void {
+  for (const advisory of advisories.filter(({ state }) => state !== "current")) {
+    output.appendLine(
+      `  ADVISORY branch=${advisory.branch} parent=${advisory.parent} state=${advisory.state} source=${advisory.source}`
+    );
   }
-  if (result.failure === "offline") {
-    return result.checkpointCreated
-      ? "WIP checkpoint saved locally but not synced. This machine still has the latest work."
-      : "No committable changes, but pending work could not be synced. This machine may still have the latest work.";
-  }
-  return result.checkpointCreated
-    ? "WIP checkpoint is local only because the remote contains different work. Do not continue on another machine until you recover or publish it."
-    : "No committable changes, but managed branches are local only because the remote contains different work. Do not continue on another machine until you recover or publish it.";
 }
 
-async function confirmWipRewrite({ unverifiedBase }: WipRewriteConfirmation): Promise<boolean> {
-  const message = unverifiedBase
-    ? "WipStream cannot verify the earlier handoff because this stream was initialized with an older version. Replace the remote WIP checkpoints only if no other machine has worked on this stream since you last saved."
-    : "WipStream detected that unaccepted WIP checkpoints were rewritten locally. Replace the remote WIP checkpoints with this condensed history?";
-  const choice = await vscode.window.showWarningMessage(message, { modal: true }, "Replace Remote WIP");
-  return choice === "Replace Remote WIP";
-}
-
-function showSuccess(output: vscode.OutputChannel, message: string, notification = message): void {
-  output.appendLine(`${new Date().toISOString()}  SUCCESS  ${message}`);
+function showSuccess(
+  output: vscode.OutputChannel,
+  command: string,
+  message: string,
+  operationId?: string,
+  notification = message
+): void {
+  output.appendLine(
+    `${new Date().toISOString()}  SUCCESS  ${command}${operationDetail(operationId)}  ${message}  next=${notification}`
+  );
   output.show(true);
   void vscode.window.showInformationMessage(`WipStream: ${notification}`);
 }
 
-function showError(output: vscode.OutputChannel, error: unknown): void {
+async function showError(output: vscode.OutputChannel, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
-  output.appendLine(`${new Date().toISOString()}  ERROR  ${message}`);
+  const code = errorCode(error);
+  output.appendLine(`${new Date().toISOString()}  ERROR${code ? ` code=${code}` : ""}  ${message}`);
   output.show(true);
-  if (error instanceof WorkflowError && error.code === "CANCELLED") {
-    vscode.window.showInformationMessage(message);
+  if (code === "CANCELLED" || code === "MIGRATION_CANCELLED") {
+    await vscode.window.showInformationMessage(message);
     return;
   }
-  vscode.window.showErrorMessage(`WipStream: ${message}`);
+  if (code === "PARENT_UPDATE_REQUIRED") {
+    const choice = await vscode.window.showWarningMessage(`WipStream: ${message}`, "Update from Parent");
+    if (choice) await vscode.commands.executeCommand(`${EXTENSION_NAME}.update`);
+    return;
+  }
+  await vscode.window.showErrorMessage(`WipStream: ${message}`);
 }
 
-async function runCommand(output: vscode.OutputChannel, title: string, action: () => Promise<void>): Promise<void> {
+async function setContext(key: typeof CONTEXT_KEYS[number], value: boolean): Promise<void> {
+  await vscode.commands.executeCommand("setContext", key, value);
+}
+
+async function refreshCommandContexts(preferred?: GitRepository): Promise<void> {
+  for (const key of CONTEXT_KEYS) await setContext(key, false);
+  let repo = preferred;
+  if (!repo) {
+    const candidates = await repositoryCandidates();
+    repo = candidates.length === 1 ? candidates[0] : undefined;
+  }
+  if (!repo) return;
+
+  try {
+    const configuration = await readRepositoryConfiguration(repo);
+    if (configuration.kind !== "version2") return;
+    await setContext("wipstream.version2", true);
+    const pending = await inspectPendingMerge(repo);
+    await setContext("wipstream.pendingMerge", Boolean(pending));
+    if (pending) return;
+
+    await setContext("wipstream.undoAvailable", (await inspectUndoEligibility(repo)).eligible);
+    const branch = await repo.currentBranch();
+    if (!branch) return;
+    const remoteDefault = await resolveRemoteDefaultBranch(repo, configuration.remote);
+    const isFeatureBranch = branch !== remoteDefault;
+    await setContext("wipstream.finishAvailable", isFeatureBranch);
+    await setContext("wipstream.condenseAvailable", isFeatureBranch);
+
+    const remoteRef = repo.remoteRef(configuration.remote, branch);
+    if (await repo.refExists(remoteRef)) {
+      await setContext(
+        "wipstream.reconcileAvailable",
+        (await repo.relation(repo.localRef(branch), remoteRef)) === "diverged"
+      );
+    }
+    const parent = await getBranchParent(repo, branch) ?? remoteDefault;
+    if (parent !== branch && await repo.branchExists(parent)) {
+      const parentContainsBranch = await repo.isAncestor(repo.localRef(branch), repo.localRef(parent));
+      const branchContainsParent = await repo.isAncestor(repo.localRef(parent), repo.localRef(branch));
+      await setContext("wipstream.updateAvailable", !parentContainsBranch && !branchContainsParent);
+    }
+  } catch {
+    // Context is advisory. Command preflights remain authoritative.
+  }
+}
+
+async function runCommand(
+  output: vscode.OutputChannel,
+  title: string,
+  action: () => Promise<void>
+): Promise<void> {
   try {
     output.appendLine(`${new Date().toISOString()}  START  ${title}`);
     await vscode.window.withProgress(
@@ -174,75 +266,288 @@ async function runCommand(output: vscode.OutputChannel, title: string, action: (
       action
     );
   } catch (error) {
-    showError(output, error);
+    await showError(output, error);
+  } finally {
+    await refreshCommandContexts(activeRepository);
   }
+}
+
+async function confirmMigration(
+  output: vscode.OutputChannel,
+  preview: Version1MigrationPreview
+): Promise<boolean> {
+  output.appendLine(
+    `${new Date().toISOString()}  PREVIEW  Migrate Version 1  kind=${preview.kind} remote=${preview.remote}`
+  );
+  output.appendLine(`  checkout: ${preview.checkout.before} -> ${preview.checkout.after}`);
+  for (const update of preview.remoteRefUpdates) {
+    output.appendLine(`  remote ${update.ref}: ${update.expected ?? "absent"} -> ${update.proposed ?? "deleted"}`);
+  }
+  for (const update of preview.localRefUpdates) {
+    output.appendLine(`  local ${update.ref}: ${update.expectedOld ?? "absent"} -> ${update.proposed ?? "deleted"}`);
+  }
+  output.show(true);
+  const message = preview.kind === "active"
+    ? `Preserve every checkpoint by advancing “${preview.featureBranch}” to the current WIP tip, then remove only “${preview.wipBranch}” locally and remotely?`
+    : "The version 1 feature is already completed. Convert this clone to the generalized branch model?";
+  return (await vscode.window.showWarningMessage(message, { modal: true }, "Migrate Repository")) === "Migrate Repository";
+}
+
+async function reportSave(output: vscode.OutputChannel, result: CommitAndSaveResult): Promise<void> {
+  appendAdvisories(output, result.advisories);
+  if (result.published) {
+    showSuccess(
+      output,
+      "Commit and Save",
+      `checkout=${result.checkout} checkpoint=${result.checkpointCreated} published=${branchList(result.publishedBranches)}; remote handoff is complete`,
+      result.operationId,
+      result.checkpointCreated ? "Checkpoint committed and all branches synchronized." : "All branches are synchronized."
+    );
+    return;
+  }
+  output.appendLine(
+    `${new Date().toISOString()}  WARNING  Commit and Save${operationDetail(result.operationId)}  ${result.message}`
+  );
+  output.show(true);
+  const action = result.reconcileBranch ? "Reconcile with Remote" : undefined;
+  const choice = action
+    ? await vscode.window.showWarningMessage(`WipStream: ${result.message}`, action)
+    : await vscode.window.showWarningMessage(`WipStream: ${result.message}`);
+  if (choice === action) await vscode.commands.executeCommand(`${EXTENSION_NAME}.reconcile`);
+}
+
+async function notifyPendingMerge(
+  output: vscode.OutputChannel,
+  command: string,
+  operationId: string,
+  conflicts: readonly string[]
+): Promise<void> {
+  output.appendLine(
+    `${new Date().toISOString()}  PENDING  ${command} operation=${operationId} conflicts=${branchList(conflicts)}  next=resolve the listed paths and Continue, or Abort`
+  );
+  output.show(true);
+  const choice = await vscode.window.showWarningMessage(
+    `WipStream merge needs attention${conflicts.length ? ` in ${conflicts.join(", ")}` : ""}.`,
+    "Continue",
+    "Abort"
+  );
+  if (choice === "Continue") await vscode.commands.executeCommand(`${EXTENSION_NAME}.continue`);
+  if (choice === "Abort") await vscode.commands.executeCommand(`${EXTENSION_NAME}.abort`);
+}
+
+async function runFinish(output: vscode.OutputChannel, repo: GitRepository): Promise<void> {
+  const result = await finishBranch(repo, {
+    save: saveHooks(repo),
+    selectParent,
+    chooseDisposition: chooseFinishDisposition,
+  });
+  showSuccess(
+    output,
+    "Finish Branch",
+    `branch=${result.branch} parent=${result.parent} disposition=${result.disposition}`,
+    result.operationId,
+    `Finished “${result.branch}” into “${result.parent}” and ${result.disposition === "delete" ? "deleted" : "retained"} the branch.`
+  );
 }
 
 export function registerCommands(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("WipStream");
   context.subscriptions.push(output);
-
-  const register = (name: string, handler: () => Promise<void>) => {
-    context.subscriptions.push(vscode.commands.registerCommand(`${EXTENSION_NAME}.${name}`, handler));
+  const register = (name: string, title: string, action: () => Promise<void>) => {
+    context.subscriptions.push(vscode.commands.registerCommand(`${EXTENSION_NAME}.${name}`, () =>
+      runCommand(output, title, action)
+    ));
   };
 
-  register("init", () =>
-    runCommand(output, "Initialize Stream", async () => {
-      const repo = await selectRepository();
-      await saveRepositoryDocuments(repo);
-      const result = await initialize(repo, await promptForConfig(repo));
-      const branch = await repo.currentBranch();
-      const initialized = result === "created"
-        ? "WipStream initialized."
-        : result === "attached"
-          ? "Existing WipStream attached."
-          : "WipStream was already initialized.";
-      const message = `${initialized} Get Current from Remote completed; editing “${branch ?? "the WIP branch"}”. Start every later editing session with WipStream: Get Current from Remote.`;
-      showSuccess(output, message, `Remote is current; editing “${branch ?? "the WIP branch"}”.`);
-    })
-  );
+  register("init", "Initialize Repository", async () => {
+    const repo = await selectRepository();
+    await saveRepositoryDocuments(repo);
+    const configuration = await readRepositoryConfiguration(repo);
+    const requestedRemote = configuration.kind === "uninitialized"
+      ? await askValue("Git remote", "origin")
+      : undefined;
+    const result = await initializeRepository(repo, requestedRemote, {
+      confirmMigrationPreview: (preview) => confirmMigration(output, preview),
+    });
+    const migration = "migration" in result
+      ? ` migration=${String((result as { readonly migration?: unknown }).migration)}`
+      : "";
+    showSuccess(
+      output,
+      "Initialize Repository",
+      `checkout=${result.checkout}${migration} published=${branchList(result.published)} created=${branchList(result.created)} fastForwarded=${branchList(result.fastForwarded)} deleted=${branchList(result.deleted)}`,
+      result.operationId,
+      `Repository initialized; “${result.checkout}” is checked out. Use Start Branch or continue on this branch.`
+    );
+  });
 
-  register("resume", () =>
-    runCommand(output, "Get Current from Remote", async () => {
-      const repo = await selectRepository();
-      assertNoDirtyDocuments(repo);
-      const result = await resume(repo);
-      const message = result === "resumed"
-        ? "Latest WipStream work loaded; you are now editing wip/feature."
-        : result === "completed"
-          ? "A feature was completed on another machine. Main is now current and temporary branches were removed. Run Initialize Stream to start the next feature."
-          : "WipStream is already current; you are editing wip/feature.";
-      showSuccess(output, message);
-    })
-  );
+  register("resume", "Get from Remote", async () => {
+    const repo = await selectRepository();
+    assertNoDirtyDocuments(repo);
+    const result = await getFromRemote(repo);
+    appendAdvisories(output, result.advisories);
+    showSuccess(
+      output,
+      "Get from Remote",
+      `checkout=${result.checkout} created=${branchList(result.created)} fastForwarded=${branchList(result.fastForwarded)} deleted=${branchList(result.deleted)}`,
+      result.operationId,
+      result.updated ? `Remote branches retrieved; continuing on “${result.checkout}”.` : `Already current on “${result.checkout}”.`
+    );
+  });
 
-  register("saveup", () =>
-    runCommand(output, "Save to Remote", async () => {
-      const repo = await selectRepository();
-      await saveRepositoryDocuments(repo);
-      showSuccess(output, syncMessage(await saveUp(repo, promptForCheckpointMessage, confirmWipRewrite)));
-    })
-  );
+  register("saveup", "Commit and Save", async () => {
+    const repo = await selectRepository();
+    await reportSave(output, await commitAndSave(repo, saveHooks(repo)));
+  });
 
-  register("tofeature", () =>
-    runCommand(output, "To Feature", async () => {
-      const repo = await selectRepository();
-      await saveRepositoryDocuments(repo);
-      const saved = await saveUp(repo, promptForCheckpointMessage, confirmWipRewrite);
-      if (!saved.published) {
-        throw new WorkflowError("NOT_SYNCED", `${syncMessage(saved)} To Feature requires a successful handoff.`);
-      }
-      const moved = await toFeature(repo);
-      showSuccess(output, moved ? "WIP commits are now accepted on feature and synced." : "Feature already contains the current WIP commits.");
-    })
-  );
+  register("start", "Start Branch", async () => {
+    const repo = await selectRepository();
+    const branch = await askValue("New branch name", "change");
+    const result = await startBranch(repo, branch);
+    showSuccess(
+      output,
+      "Start Branch",
+      `branch=${result.branch} parent=${result.parent}`,
+      result.operationId,
+      `Started “${result.branch}” from “${result.parent}”.`
+    );
+  });
 
-  register("tomain", () =>
-    runCommand(output, "To Main", async () => {
-      const repo = await selectRepository();
-      await saveRepositoryDocuments(repo);
-      const result: FinishResult = await toMain(repo);
-      showSuccess(output, result === "finished" ? "Feature completed on main and temporary branches removed." : "Feature was already completed; local cleanup is finished.");
-    })
-  );
+  register("finish", "Finish Branch", async () => {
+    const repo = await selectRepository();
+    await saveRepositoryDocuments(repo);
+    await runFinish(output, repo);
+  });
+
+  register("update", "Update from Parent", async () => {
+    const repo = await selectRepository();
+    assertNoDirtyDocuments(repo);
+    const result = await updateFromParent(repo, selectParent);
+    if (result.pending && result.operationId) {
+      await notifyPendingMerge(output, "Update from Parent", result.operationId, result.conflicts ?? []);
+      return;
+    }
+    showSuccess(
+      output,
+      "Update from Parent",
+      `branch=${result.branch} parent=${result.parent} updated=${result.updated}`,
+      result.operationId,
+      result.updated ? `Merged “${result.parent}” into “${result.branch}”.` : `“${result.branch}” already contains “${result.parent}”.`
+    );
+  });
+
+  register("reconcile", "Reconcile with Remote", async () => {
+    const repo = await selectRepository();
+    assertNoDirtyDocuments(repo);
+    const result = await reconcileWithRemote(repo, saveHooks(repo));
+    if (result.pending) {
+      await notifyPendingMerge(output, "Reconcile with Remote", result.operationId, result.conflicts);
+      return;
+    }
+    output.appendLine(
+      `${new Date().toISOString()}  SUCCESS  Reconcile with Remote operation=${result.operationId} branch=${result.branch} merged=true  next=automatic Commit and Save result follows`
+    );
+    if (result.save) await reportSave(output, result.save);
+  });
+
+  register("continue", "Continue Pending Merge", async () => {
+    const repo = await selectRepository();
+    await saveRepositoryDocuments(repo);
+    const result = await continuePendingMerge(repo, saveHooks(repo));
+    output.appendLine(
+      `${new Date().toISOString()}  SUCCESS  Continue Pending Merge operation=${result.operationId} originalCommand=${result.command}  next=automatic Commit and Save result follows`
+    );
+    await reportSave(output, result.save);
+  });
+
+  register("abort", "Abort Pending Merge", async () => {
+    const repo = await selectRepository();
+    const pending = await inspectPendingMerge(repo);
+    if (!pending) throw new CommandUiError("NO_PENDING_MERGE", "No WipStream merge is pending.");
+    const confirmed = await vscode.window.showWarningMessage(
+      `Abort ${pending.command} on “${pending.branch}” and restore its exact pre-merge state?`,
+      { modal: true },
+      "Abort Merge"
+    );
+    if (confirmed !== "Abort Merge") throw new CommandUiError("CANCELLED", "Abort was cancelled.");
+    const result = await abortPendingMerge(repo);
+    showSuccess(
+      output,
+      "Abort Pending Merge",
+      `restored=true originalCommand=${result.command}`,
+      result.operationId,
+      `Aborted ${result.command} and restored the recorded pre-merge state.`
+    );
+  });
+
+  register("undo", "Undo Last Action", async () => {
+    const repo = await selectRepository();
+    const eligibility = await inspectUndoEligibility(repo);
+    if (!eligibility.eligible || !eligibility.operationId) {
+      throw new CommandUiError("UNDO_NOT_ELIGIBLE", eligibility.reason ?? "The latest action is not undoable.");
+    }
+    const confirmed = await vscode.window.showWarningMessage(
+      `Undo the exact completed WipStream action “${eligibility.command}” (${eligibility.operationId})?`,
+      { modal: true },
+      "Undo Action"
+    );
+    if (confirmed !== "Undo Action") throw new CommandUiError("CANCELLED", "Undo was cancelled.");
+    const result = await undoLastAction(repo);
+    showSuccess(
+      output,
+      "Undo Last Action",
+      `undoneOperation=${result.undoneOperationId} command=${result.command} checkout=${result.restoredCheckout ?? "detached"}`,
+      result.operationId,
+      `Undid “${result.command}” and restored its exact recorded before-state.`
+    );
+  });
+
+  register("condense", "Condense Branch (Advanced)", async () => {
+    const repo = await selectRepository();
+    assertNoDirtyDocuments(repo);
+    const result = await condenseBranch(repo, {
+      selectParent,
+      confirmPreview: async (preview: CondensePreview) => (
+        await vscode.window.showWarningMessage(
+          `Replace ${preview.exclusiveCommits} commits exclusive to “${preview.branch}” with one tree-equivalent commit? Recovery refs and Undo will protect the prior tip.`,
+          { modal: true },
+          "Condense Branch"
+        )
+      ) === "Condense Branch",
+      requestMessage: async (suggestedMessage) => askValue("Condensed commit message", suggestedMessage),
+    });
+    showSuccess(
+      output,
+      "Condense Branch",
+      `branch=${result.branch} parent=${result.parent} commits=${result.exclusiveCommits} old=${result.oldTip} new=${result.newTip}`,
+      result.operationId,
+      `Condensed ${result.exclusiveCommits} commits on “${result.branch}”.`
+    );
+  });
+
+  register("tofeature", "To Feature (Legacy)", async () => {
+    const repo = await selectRepository();
+    const configuration = await readRepositoryConfiguration(repo);
+    const message = configuration.kind === "version1"
+      ? "The accepted/WIP split is removed in version 2. Run Initialize Repository to preview migration; it preserves every WIP checkpoint on the feature branch."
+      : "Version 2 has no separate accepted/WIP branch. Commit and Save publishes the checked-out ordinary branch without rewriting it.";
+    output.appendLine(`${new Date().toISOString()}  LEGACY  To Feature  ${message}`);
+    output.show(true);
+    await vscode.window.showInformationMessage(`WipStream: ${message}`);
+  });
+
+  register("tomain", "To Main (Legacy)", async () => {
+    const repo = await selectRepository();
+    const configuration = await readRepositoryConfiguration(repo);
+    if (configuration.kind !== "version2") {
+      throw new CommandUiError(
+        "VERSION_2_REQUIRED",
+        "Run Initialize Repository to migrate version 1, then use Finish Branch. The legacy command will not migrate implicitly."
+      );
+    }
+    await saveRepositoryDocuments(repo);
+    await runFinish(output, repo);
+  });
+
+  void refreshCommandContexts();
 }

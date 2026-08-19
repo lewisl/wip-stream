@@ -324,26 +324,26 @@ Exit gate:
 
 ## Phase 11: UI, documentation, and release verification
 
-- [ ] Rename the primary command titles while retaining their ids and keybindings.
-- [ ] Add Start and Finish as secondary Command Palette actions.
-- [ ] Surface Update, Reconcile, Continue, Abort, and Undo only in their relevant
+- [x] Rename the primary command titles while retaining their ids and keybindings.
+- [x] Add Start and Finish as secondary Command Palette actions.
+- [x] Surface Update, Reconcile, Continue, Abort, and Undo only in their relevant
   contexts.
-- [ ] Mark Condense advanced and leave it without a default keybinding.
-- [ ] Make Output records include operation id, branch names, result, and safe
+- [x] Mark Condense advanced and leave it without a default keybinding.
+- [x] Make Output records include operation id, branch names, result, and safe
   next action.
-- [ ] Update README diagrams, command documentation, recovery guidance, agent
+- [x] Update README diagrams, command documentation, recovery guidance, agent
   guidance, and the one-worktree warning.
-- [ ] Update the live-test fixture for multiple ordinary branches and two
+- [x] Update the live-test fixture for multiple ordinary branches and two
   separate clones.
-- [ ] Run compile, automated integration tests, packaging validation, and the
+- [x] Run compile, automated integration tests, packaging validation, and the
   isolated two-window live test.
-- [ ] Review the final diff for accidental worktree support, hidden rebase,
+- [x] Review the final diff for accidental worktree support, hidden rebase,
   background behavior, or non-atomic remote publication.
 
 Exit gate:
 
-- [ ] The normal documented workflow contains only Init, Get, and Commit and
+- [x] The normal documented workflow contains only Init, Get, and Commit and
   Save.
-- [ ] All automated and live acceptance tests pass.
-- [ ] The packaged VSIX exposes only the intended primary, secondary, and
+- [x] All automated and live acceptance tests pass.
+- [x] The packaged VSIX exposes only the intended primary, secondary, and
   contextual UI.
