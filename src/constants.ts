@@ -1,6 +1,7 @@
 export const EXTENSION_NAME = "wipstream";
 
 export const CONFIG_VERSION = "1";
+export const REPOSITORY_CONFIG_VERSION = "2";
 
 export const CONFIG_KEYS = {
   version: "wipstream.version",

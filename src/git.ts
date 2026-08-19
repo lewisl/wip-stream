@@ -4,6 +4,12 @@ import * as path from "path";
 
 export type BranchRelation = "equal" | "behind" | "ahead" | "diverged";
 
+export interface GitRef {
+  readonly name: string;
+  readonly objectId: string;
+  readonly upstream?: string;
+}
+
 export class GitError extends Error {
   public readonly args: readonly string[];
   public readonly exitCode: number | undefined;
@@ -85,6 +91,27 @@ export class GitRepository {
 
   public async setConfig(key: string, value: string): Promise<void> {
     await this.run(["config", "--local", key, value]);
+  }
+
+  public async symbolicRef(ref: string): Promise<string | undefined> {
+    const result = await this.tryRun(["symbolic-ref", "--quiet", ref]);
+    return result.exitCode === 0 ? result.stdout.trim() : undefined;
+  }
+
+  public async listRefs(prefix: string): Promise<readonly GitRef[]> {
+    const output = await this.run([
+      "for-each-ref",
+      "--format=%(refname)\t%(objectname)\t%(upstream:short)",
+      prefix,
+    ]);
+    if (!output) {
+      return [];
+    }
+
+    return output.split("\n").map((line) => {
+      const [name, objectId, upstream] = line.split("\t");
+      return { name, objectId, upstream: upstream || undefined };
+    });
   }
 
   public async validateBranchName(branch: string): Promise<boolean> {

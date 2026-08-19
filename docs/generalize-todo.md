@@ -23,29 +23,29 @@ Exit gate:
 
 ## Phase 1: Introduce the version 2 repository model
 
-- [ ] Replace the fixed main/feature/WIP configuration type with repository
+- [x] Replace the fixed main/feature/WIP configuration type with repository
   configuration containing schema version and selected remote.
-- [ ] Add helpers for reading and writing local
+- [x] Add helpers for reading and writing local
   `branch.<name>.wipstreamParent` intent.
-- [ ] Define the ordinary branch universe as local and remote
+- [x] Define the ordinary branch universe as local and remote
   `refs/heads/*`, excluding internal WipStream recovery refs.
-- [ ] Resolve and validate the remote default branch through its symbolic HEAD.
-- [ ] Add branch inventory types containing local tip, previous remote tip,
+- [x] Resolve and validate the remote default branch through its symbolic HEAD.
+- [x] Add branch inventory types containing local tip, previous remote tip,
   fetched remote tip, tracking state, checked-out state, and relation.
-- [ ] Add deterministic classification for equal, local-ahead, local-only,
+- [x] Add deterministic classification for equal, local-ahead, local-only,
   remote-ahead, remote-only, diverged, and remotely deleted branches.
-- [ ] Keep version 1 configuration readable without converting it yet.
+- [x] Keep version 1 configuration readable without converting it yet.
 
 Tests:
 
-- [ ] Inventory covers multiple branches, slash-containing names, local-only
+- [x] Inventory covers multiple branches, slash-containing names, local-only
   branches, remote-only branches, force-rewritten branches, and remote deletion.
-- [ ] Missing or ambiguous remote HEAD produces an actionable refusal.
-- [ ] Tags and internal refs never enter the ordinary branch inventory.
+- [x] Missing or ambiguous remote HEAD produces an actionable refusal.
+- [x] Tags and internal refs never enter the ordinary branch inventory.
 
 Exit gate:
 
-- [ ] The new model can inspect version 1 and version 2 repositories without
+- [x] The new model can inspect version 1 and version 2 repositories without
   moving refs or changing configuration.
 
 ## Phase 2: Enforce one clone and one worktree
