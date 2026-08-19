@@ -70,8 +70,20 @@ export type MutationBoundary =
   | "checkout"
   | "configuration"
   | "merge";
-export type OperationPhase = "planned" | `before-${MutationBoundary}` | `after-${MutationBoundary}` | "completed";
-export type OperationStatus = "planned" | "in-progress" | "completed";
+export type TerminalOperationPhase = "completed" | "aborted";
+export type OperationPhase = "planned" | `before-${MutationBoundary}` | `after-${MutationBoundary}` | TerminalOperationPhase;
+export type OperationStatus = "planned" | "in-progress" | "completed" | "aborted";
+
+export interface PendingMerge {
+  readonly kind: "merge";
+  readonly command: "Update from Parent" | "Reconcile with Remote";
+  readonly branch: string;
+  readonly mergeTarget: string;
+  readonly preHead: string;
+  readonly preIndexTree: string;
+  readonly preStatus: string;
+  readonly conflicts: readonly string[];
+}
 
 export interface OperationReceiptEvent {
   readonly phase: OperationPhase;
@@ -84,6 +96,7 @@ export interface OperationReceipt {
   readonly phase: OperationPhase;
   readonly status: OperationStatus;
   readonly events: readonly OperationReceiptEvent[];
+  readonly pendingMerge?: Readonly<PendingMerge>;
   readonly completedAt?: string;
 }
 
@@ -213,7 +226,7 @@ function isOperationReceipt(value: unknown): value is OperationReceipt {
     && receipt.plan !== null
     && typeof receipt.plan.operationId === "string"
     && typeof receipt.phase === "string"
-    && ["planned", "in-progress", "completed"].includes(String(receipt.status))
+    && ["planned", "in-progress", "completed", "aborted"].includes(String(receipt.status))
     && Array.isArray(receipt.events);
 }
 
@@ -314,6 +327,43 @@ export async function recordOperationPhase(
   return updated;
 }
 
+export async function recordPendingMerge(
+  repo: GitRepository,
+  operationId: string,
+  pendingMerge: PendingMerge
+): Promise<OperationReceipt> {
+  const receipt = await readOperationReceipt(repo, operationId);
+  if (receipt.status !== "in-progress" || receipt.phase !== "before-merge") {
+    return fail(
+      "INVALID_PENDING_MERGE",
+      `WipStream operation ${operationId} is not waiting inside a merge boundary.`
+    );
+  }
+  const updated: OperationReceipt = {
+    ...receipt,
+    pendingMerge: Object.freeze({ ...pendingMerge, conflicts: Object.freeze([...pendingMerge.conflicts]) }),
+  };
+  await writeReceipt(await operationReceiptPath(repo, operationId), updated, false);
+  return updated;
+}
+
+export async function abortOperation(repo: GitRepository, operationId: string): Promise<OperationReceipt> {
+  const receipt = await readOperationReceipt(repo, operationId);
+  if (receipt.status !== "in-progress") {
+    return fail("OPERATION_NOT_IN_PROGRESS", `WipStream operation ${operationId} is not in progress.`);
+  }
+  const recordedAt = new Date().toISOString();
+  const updated: OperationReceipt = {
+    ...receipt,
+    phase: "aborted",
+    status: "aborted",
+    events: [...receipt.events, { phase: "aborted", recordedAt }],
+    completedAt: recordedAt,
+  };
+  await writeReceipt(await operationReceiptPath(repo, operationId), updated, false);
+  return updated;
+}
+
 export async function withMutationBoundary<T>(
   repo: GitRepository,
   operationId: string,
@@ -349,7 +399,9 @@ export async function listOperationReceipts(repo: GitRepository): Promise<readon
 }
 
 export async function inspectIncompleteOperations(repo: GitRepository): Promise<readonly OperationReceipt[]> {
-  return (await listOperationReceipts(repo)).filter((receipt) => receipt.status !== "completed");
+  return (await listOperationReceipts(repo)).filter(
+    (receipt) => receipt.status === "planned" || receipt.status === "in-progress"
+  );
 }
 
 export async function pruneCompletedReceipts(repo: GitRepository, retainCompleted = 50): Promise<void> {

@@ -1,4 +1,4 @@
-import { GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
+import { GitError, GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
 import {
   getBranchParent,
   inspectBranchInventory,
@@ -14,6 +14,7 @@ import {
   completeOperation,
   createOperationPlan,
   inspectIncompleteOperations,
+  recordPendingMerge,
   recoveryRef,
   withMutationBoundary,
 } from "./operations";
@@ -48,6 +49,8 @@ export interface UpdateFromParentResult {
   readonly branch: string;
   readonly parent: string;
   readonly updated: boolean;
+  readonly pending?: boolean;
+  readonly conflicts?: readonly string[];
 }
 
 export interface FinishBranchOptions {
@@ -230,6 +233,8 @@ async function updateFromParentUnlocked(
   }
 
   const before = await repo.hash(repo.localRef(branch));
+  const preIndexTree = await repo.indexTree();
+  const preStatus = await repo.statusPorcelain();
   const plan = createOperationPlan({
     command: "Update from Parent",
     checkout: { before: branch, after: branch },
@@ -245,7 +250,25 @@ async function updateFromParentUnlocked(
     expectedOld: null,
     proposed: before,
   }]));
-  await withMutationBoundary(repo, plan.operationId, "merge", () => repo.merge(parent));
+  try {
+    await withMutationBoundary(repo, plan.operationId, "merge", () => repo.merge(parent));
+  } catch (error) {
+    const conflicts = await repo.conflictPaths();
+    if (error instanceof GitError && (await repo.operationInProgress()) && conflicts.length) {
+      await recordPendingMerge(repo, plan.operationId, {
+        kind: "merge",
+        command: "Update from Parent",
+        branch,
+        mergeTarget: repo.localRef(parent),
+        preHead: before,
+        preIndexTree,
+        preStatus,
+        conflicts,
+      });
+      return { operationId: plan.operationId, branch, parent, updated: false, pending: true, conflicts };
+    }
+    throw error;
+  }
   await completeOperation(repo, plan.operationId);
   return { operationId: plan.operationId, branch, parent, updated: true };
 }

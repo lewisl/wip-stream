@@ -240,29 +240,29 @@ Exit gate:
 
 ## Phase 8: Add divergence and guided conflict handling
 
-- [ ] Offer Reconcile only for current-branch local/remote divergence.
-- [ ] Merge the fetched remote tip into the clean locally checkpointed branch.
-- [ ] Use the same pending-operation model for Reconcile and Update conflicts.
-- [ ] Record conflicting paths and surface Continue and Abort contextually.
-- [ ] Block unrelated WipStream mutations while an operation is pending.
-- [ ] Continue only after Git reports no unresolved conflicts, then commit and
+- [x] Offer Reconcile only for current-branch local/remote divergence.
+- [x] Merge the fetched remote tip into the clean locally checkpointed branch.
+- [x] Use the same pending-operation model for Reconcile and Update conflicts.
+- [x] Record conflicting paths and surface Continue and Abort contextually.
+- [x] Block unrelated WipStream mutations while an operation is pending.
+- [x] Continue only after Git reports no unresolved conflicts, then commit and
   run Commit and Save.
-- [ ] Abort with `git merge --abort` and verify the complete recorded
+- [x] Abort with `git merge --abort` and verify the complete recorded
   pre-merge state.
-- [ ] If abort verification fails, retain the receipt and report exact recovery
+- [x] If abort verification fails, retain the receipt and report exact recovery
   state rather than claiming success.
 
 Tests:
 
-- [ ] Clean Reconcile publishes a merge containing both clones' work.
-- [ ] Conflicted Update and Reconcile expose only the relevant recovery actions.
-- [ ] Continue refuses unresolved conflicts.
-- [ ] Abort restores branch, index, worktree, and operation state exactly.
-- [ ] Restarting VS Code rediscovers and explains a pending operation.
+- [x] Clean Reconcile publishes a merge containing both clones' work.
+- [x] Conflicted Update and Reconcile expose only the relevant recovery actions.
+- [x] Continue refuses unresolved conflicts.
+- [x] Abort restores branch, index, worktree, and operation state exactly.
+- [x] Restarting VS Code rediscovers and explains a pending operation.
 
 Exit gate:
 
-- [ ] No merge conflict can become an unnamed or unexplained repository state.
+- [x] No merge conflict can become an unnamed or unexplained repository state.
 
 ## Phase 9: Add safe Undo
 

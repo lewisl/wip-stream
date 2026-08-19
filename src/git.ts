@@ -358,6 +358,15 @@ export class GitRepository {
     return (await this.run(["diff", "--name-only", "--diff-filter=U"])).length > 0;
   }
 
+  public async conflictPaths(): Promise<readonly string[]> {
+    const output = await this.run(["diff", "--name-only", "--diff-filter=U", "-z"]);
+    return output.split("\0").filter(Boolean).sort();
+  }
+
+  public async indexTree(): Promise<string> {
+    return this.run(["write-tree"]);
+  }
+
   public async operationInProgress(): Promise<boolean> {
     const markers = [
       "MERGE_HEAD",
@@ -453,6 +462,16 @@ export class GitRepository {
   public async merge(branch: string): Promise<void> {
     await this.assertSingleWorktree();
     await this.run(["merge", "--no-edit", branch]);
+  }
+
+  public async commitMerge(): Promise<void> {
+    await this.assertSingleWorktree();
+    await this.run(["commit", "--no-edit"]);
+  }
+
+  public async abortMerge(): Promise<void> {
+    await this.assertSingleWorktree();
+    await this.run(["merge", "--abort"]);
   }
 
   public async countCommits(range: string): Promise<number> {

@@ -17,7 +17,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 7 are complete. The recorded baseline is in
+- Phases 0 through 8 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -52,10 +52,13 @@
   Update fetches then merges; Finish saves first and atomically publishes its
   parent update plus optional deletion; Condense is previewed, exact-leased,
   tree-preserving, and protected by recovery refs.
+- `src/conflict-workflow.ts` provides contextual Reconcile plus durable pending
+  merge discovery shared with Update. Continue requires resolved paths before
+  committing and saving; Abort verifies the recorded branch, HEAD, index tree,
+  worktree status, and Git-operation state before marking a receipt aborted.
 - TypeScript now explicitly targets ES2020 with Node module resolution and
   Node/VS Code ambient types, matching the declared VS Code runtime and
   resolving editor diagnostics for modern array/string methods and Node
   built-in modules.
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 8 by adding contextual Reconcile plus guided Continue and Abort
-  for merge conflicts.
+- Begin Phase 9 by implementing exact-state, receipt-driven Undo.
