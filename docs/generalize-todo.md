@@ -50,27 +50,27 @@ Exit gate:
 
 ## Phase 2: Enforce one clone and one worktree
 
-- [ ] Add structured `git worktree list --porcelain` parsing to the Git facade.
-- [ ] Require exactly one worktree at the start of every mutating workflow.
-- [ ] Recheck immediately before every local-ref transaction and remote push.
-- [ ] Report every additional worktree path, HEAD, and checked-out branch.
-- [ ] Add a repository-local WipStream command lock with stale-lock diagnostics.
-- [ ] Ensure WipStream never invokes worktree add, move, repair, prune, unlock,
+- [x] Add structured `git worktree list --porcelain` parsing to the Git facade.
+- [x] Require exactly one worktree at the start of every mutating workflow.
+- [x] Recheck immediately before every local-ref transaction and remote push.
+- [x] Report every additional worktree path, HEAD, and checked-out branch.
+- [x] Add a repository-local WipStream command lock with stale-lock diagnostics.
+- [x] Ensure WipStream never invokes worktree add, move, repair, prune, unlock,
   or remove.
 
 Tests:
 
-- [ ] A clean linked worktree blocks mutation.
-- [ ] A dirty linked worktree blocks mutation without inspecting or modifying
+- [x] A clean linked worktree blocks mutation.
+- [x] A dirty linked worktree blocks mutation without inspecting or modifying
   its files.
-- [ ] A linked worktree injected after initial preflight is caught by the final
+- [x] A linked worktree injected after initial preflight is caught by the final
   pre-mutation check.
-- [ ] Two separate clones remain supported.
-- [ ] Concurrent WipStream commands in one clone serialize or refuse cleanly.
+- [x] Two separate clones remain supported.
+- [x] Concurrent WipStream commands in one clone serialize or refuse cleanly.
 
 Exit gate:
 
-- [ ] No mutating workflow can proceed while a linked worktree is known to
+- [x] No mutating workflow can proceed while a linked worktree is known to
   exist.
 
 ## Phase 3: Build plans, local ref transactions, and receipts

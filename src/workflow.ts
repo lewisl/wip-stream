@@ -1,5 +1,6 @@
 import { CONFIG_KEYS, CONFIG_VERSION } from "./constants";
 import { BranchRelation, GitError, GitRepository } from "./git";
+import { withRepositoryCommandLock } from "./repository-safety";
 
 export interface StreamConfig {
   readonly remote: string;
@@ -141,6 +142,7 @@ function branches(repo: GitRepository, config: StreamConfig): ManagedBranch[] {
 }
 
 async function requireStableRepository(repo: GitRepository, requireClean: boolean): Promise<void> {
+  await repo.assertSingleWorktree();
   if (await repo.isBare()) {
     fail("BARE_REPOSITORY", "WipStream requires a normal Git working repository, not a bare repository.");
   }
@@ -276,6 +278,10 @@ async function prepareWipRewrite(repo: GitRepository, config: StreamConfig): Pro
 }
 
 export async function initialize(repo: GitRepository, input: StreamConfigInput = {}): Promise<InitializeResult> {
+  return withRepositoryCommandLock(repo, "Initialize Repository", () => initializeUnlocked(repo, input));
+}
+
+async function initializeUnlocked(repo: GitRepository, input: StreamConfigInput = {}): Promise<InitializeResult> {
   await requireStableRepository(repo, true);
   const config = await resolveConfig(repo, input);
   await validateRemote(repo, config);
@@ -351,7 +357,7 @@ export async function initialize(repo: GitRepository, input: StreamConfigInput =
     await repo.setUpstream(config.featureBranch, `${config.remote}/${config.featureBranch}`);
     await repo.setUpstream(config.wipBranch, `${config.remote}/${config.wipBranch}`);
     await saveConfig(repo, config);
-    await resume(repo);
+    await resumeUnlocked(repo);
     return "created";
   }
 
@@ -364,11 +370,15 @@ export async function initialize(repo: GitRepository, input: StreamConfigInput =
     await repo.switch(branchBeforeUpdate);
   }
   await saveConfig(repo, config);
-  await resume(repo);
+  await resumeUnlocked(repo);
   return changed ? "attached" : "current";
 }
 
 export async function resume(repo: GitRepository): Promise<ResumeResult> {
+  return withRepositoryCommandLock(repo, "Get from Remote", () => resumeUnlocked(repo));
+}
+
+async function resumeUnlocked(repo: GitRepository): Promise<ResumeResult> {
   const config = await getStreamConfig(repo);
   await requireStableRepository(repo, true);
   await validateRemote(repo, config);
@@ -438,6 +448,16 @@ export async function saveUp(
   requestCheckpointMessage?: CheckpointMessageProvider,
   confirmWipRewrite?: WipRewriteConfirmationProvider
 ): Promise<SyncResult> {
+  return withRepositoryCommandLock(repo, "Commit and Save", () =>
+    saveUpUnlocked(repo, requestCheckpointMessage, confirmWipRewrite)
+  );
+}
+
+async function saveUpUnlocked(
+  repo: GitRepository,
+  requestCheckpointMessage?: CheckpointMessageProvider,
+  confirmWipRewrite?: WipRewriteConfirmationProvider
+): Promise<SyncResult> {
   const config = await getStreamConfig(repo);
   await validateSaveUpState(repo, config);
 
@@ -485,6 +505,10 @@ export async function saveUp(
 }
 
 export async function toFeature(repo: GitRepository): Promise<boolean> {
+  return withRepositoryCommandLock(repo, "To Feature", () => toFeatureUnlocked(repo));
+}
+
+async function toFeatureUnlocked(repo: GitRepository): Promise<boolean> {
   const config = await getStreamConfig(repo);
   await validateSaveUpState(repo, config);
   if (!(await repo.isAncestor(config.featureBranch, config.wipBranch))) {
@@ -511,6 +535,10 @@ async function cleanupLocalTemporaryBranches(repo: GitRepository, config: Stream
 }
 
 export async function toMain(repo: GitRepository): Promise<FinishResult> {
+  return withRepositoryCommandLock(repo, "To Main", () => toMainUnlocked(repo));
+}
+
+async function toMainUnlocked(repo: GitRepository): Promise<FinishResult> {
   const config = await getStreamConfig(repo);
   await requireStableRepository(repo, true);
   await validateRemote(repo, config);

@@ -10,6 +10,86 @@ export interface GitRef {
   readonly upstream?: string;
 }
 
+export interface GitWorktree {
+  readonly path: string;
+  readonly head?: string;
+  readonly branch?: string;
+  readonly detached: boolean;
+  readonly bare: boolean;
+  readonly locked?: string;
+  readonly prunable?: string;
+}
+
+export class GitWorktreeError extends Error {
+  public readonly code = "ADDITIONAL_WORKTREES";
+  public readonly worktrees: readonly GitWorktree[];
+
+  constructor(worktrees: readonly GitWorktree[]) {
+    const details = worktrees.map((worktree) => {
+      const state = worktree.branch ? `branch ${worktree.branch}` : worktree.detached ? "detached HEAD" : "no branch";
+      return `• ${worktree.path} (${state}${worktree.head ? `, ${worktree.head}` : ""})`;
+    });
+    super(`WipStream requires exactly one worktree. Remove the additional Git worktrees before retrying:\n${details.join("\n")}`);
+    this.name = "GitWorktreeError";
+    this.worktrees = worktrees;
+  }
+}
+
+interface MutableGitWorktree {
+  path?: string;
+  head?: string;
+  branch?: string;
+  detached?: boolean;
+  bare?: boolean;
+  locked?: string;
+  prunable?: string;
+}
+
+export function parseWorktreePorcelain(output: string): readonly GitWorktree[] {
+  const result: GitWorktree[] = [];
+  let current: MutableGitWorktree | undefined;
+
+  const finish = () => {
+    if (current?.path) {
+      result.push({
+        path: current.path,
+        head: current.head,
+        branch: current.branch,
+        detached: current.detached ?? false,
+        bare: current.bare ?? false,
+        locked: current.locked,
+        prunable: current.prunable,
+      });
+    }
+    current = undefined;
+  };
+
+  for (const field of output.split("\0")) {
+    if (!field) {
+      finish();
+      continue;
+    }
+    const separator = field.indexOf(" ");
+    const key = separator < 0 ? field : field.slice(0, separator);
+    const value = separator < 0 ? undefined : field.slice(separator + 1);
+    if (key === "worktree") {
+      finish();
+      current = { path: value };
+    } else if (current) {
+      switch (key) {
+        case "HEAD": current.head = value; break;
+        case "branch": current.branch = value?.replace(/^refs\/heads\//, ""); break;
+        case "detached": current.detached = true; break;
+        case "bare": current.bare = true; break;
+        case "locked": current.locked = value || "locked"; break;
+        case "prunable": current.prunable = value || "prunable"; break;
+      }
+    }
+  }
+  finish();
+  return result;
+}
+
 export class GitError extends Error {
   public readonly args: readonly string[];
   public readonly exitCode: number | undefined;
@@ -90,7 +170,29 @@ export class GitRepository {
   }
 
   public async setConfig(key: string, value: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["config", "--local", key, value]);
+  }
+
+  public async commonGitDirectory(): Promise<string> {
+    return path.resolve(this.root, await this.run(["rev-parse", "--git-common-dir"]));
+  }
+
+  public async worktrees(): Promise<readonly GitWorktree[]> {
+    const result = await this.tryRun(["worktree", "list", "--porcelain", "-z"]);
+    if (result.exitCode !== 0) {
+      const message = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+      throw new GitError(["worktree", "list", "--porcelain", "-z"], message, result.exitCode);
+    }
+    return parseWorktreePorcelain(result.stdout);
+  }
+
+  public async assertSingleWorktree(): Promise<void> {
+    const worktrees = await this.worktrees();
+    if (worktrees.length !== 1 || path.resolve(worktrees[0].path) !== path.resolve(this.root)) {
+      const additional = worktrees.filter((worktree) => path.resolve(worktree.path) !== path.resolve(this.root));
+      throw new GitWorktreeError(additional.length ? additional : worktrees);
+    }
   }
 
   public async symbolicRef(ref: string): Promise<string | undefined> {
@@ -217,38 +319,47 @@ export class GitRepository {
   }
 
   public async fetch(remote: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["fetch", "--prune", remote]);
   }
 
   public async createBranch(branch: string, startPoint: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["branch", branch, startPoint]);
   }
 
   public async createTrackingBranch(branch: string, remoteRef: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["branch", "--track", branch, remoteRef]);
   }
 
   public async setUpstream(branch: string, remoteRef: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["branch", "--set-upstream-to", remoteRef, branch]);
   }
 
   public async moveBranch(branch: string, target: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["branch", "-f", branch, target]);
   }
 
   public async detach(): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["switch", "--detach"]);
   }
 
   public async switch(branch: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["switch", branch]);
   }
 
   public async fastForward(target: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["merge", "--ff-only", target]);
   }
 
   public async stageAll(): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["add", "--all"]);
   }
 
@@ -268,6 +379,7 @@ export class GitRepository {
   }
 
   public async commit(message: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["commit", "-m", message]);
   }
 
@@ -276,6 +388,7 @@ export class GitRepository {
     refspecs: readonly string[],
     leases: Readonly<Record<string, string>> = {}
   ): Promise<void> {
+    await this.assertSingleWorktree();
     const leaseArgs = Object.entries(leases).map(
       ([branch, expected]) => `--force-with-lease=refs/heads/${branch}:${expected}`
     );
@@ -283,11 +396,13 @@ export class GitRepository {
   }
 
   public async verifyAtomicPush(remote: string, branch: string): Promise<void> {
+    await this.assertSingleWorktree();
     await this.run(["push", "--atomic", "--dry-run", remote, `${branch}:${branch}`]);
   }
 
   public async deleteLocalBranch(branch: string): Promise<void> {
     if (await this.branchExists(branch)) {
+      await this.assertSingleWorktree();
       await this.run(["branch", "-d", branch]);
     }
   }
