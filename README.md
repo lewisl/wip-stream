@@ -139,6 +139,14 @@ already contained in completed remote main, convert without recreating those
 temporary branches. Partial, divergent, rewritten-without-proof, or otherwise
 unrecognized states refuse before changing ordinary refs or configuration.
 
+After one clone migrates and continues working, another version 1 clone can
+adopt that already-migrated remote even when its main and temporary tips are
+stale. The legacy conversion does not rewrite the remote feature: it requires
+the clone's last handed-off WIP and every remaining local legacy tip to be
+ancestors of the surviving remote feature, then retrieves remote main and
+feature transactionally. As with any Initialize, unrelated safe local branch
+advances are still reconciled with the remote.
+
 For the one realistic version 1 repository, use this controlled rehearsal while
 no other clone is active:
 
@@ -206,7 +214,7 @@ code --install-extension /path/to/lewisl.wipstream-<version>.vsix
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.2.0.vsix --force
+code --install-extension dist/lewisl.wipstream-0.2.1.vsix --force
 ```
 
 `npm test` uses disposable local bare remotes and clones; it never contacts a

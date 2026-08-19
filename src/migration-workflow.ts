@@ -273,22 +273,39 @@ async function prepareMigration(
     await requireTopology(repo, remoteMain, remoteFeature, remoteWip);
     kind = "active";
   } else if (remoteFeature && !remoteWip) {
-    if (!localFeature || !localWip || localMain !== remoteMain) {
+    const mainRelation = await relation(repo, localMain, remoteMain);
+    if (mainRelation === "local-ahead" || mainRelation === "diverged") {
       return fail(
-        "MIGRATION_PARTIAL_REMOTE_STREAM",
-        "Exactly one temporary remote branch exists and it is not a provable interrupted migration."
+        "MIGRATION_ALREADY_MIGRATED_MAIN_UNSAFE",
+        "The remote has the migrated feature-only shape, but local main contains work not present on remote main."
       );
     }
-    await requireTopology(repo, localMain, localFeature, localWip);
     if (
-      remoteFeature !== localWip
-      || !configuration.lastKnownRemoteWip
-      || configuration.lastKnownRemoteWip !== localWip
+      !configuration.lastKnownRemoteWip
+      || !(await repo.refExists(configuration.lastKnownRemoteWip))
+      || !(await repo.isAncestor(configuration.lastKnownRemoteWip, remoteFeature))
     ) {
       return fail(
-        "MIGRATION_PARTIAL_REMOTE_STREAM",
-        "The remote feature-without-WIP state does not exactly match a previously handed-off WIP tip."
+        "MIGRATION_ALREADY_MIGRATED_WIP_UNSAFE",
+        "The surviving remote feature does not contain this clone’s last successfully handed-off WIP tip."
       );
+    }
+    if (!(await repo.isAncestor(localMain, remoteFeature))) {
+      return fail(
+        "MIGRATION_ALREADY_MIGRATED_TOPOLOGY_UNSAFE",
+        "The surviving remote feature does not descend from this clone’s legacy main tip."
+      );
+    }
+    for (const [name, tip] of [
+      [configuration.featureBranch, localFeature],
+      [configuration.wipBranch, localWip],
+    ] as const) {
+      if (tip && (!(await repo.isAncestor(localMain, tip)) || !(await repo.isAncestor(tip, remoteFeature)))) {
+        return fail(
+          "MIGRATION_ALREADY_MIGRATED_LOCAL_WORK_UNSAFE",
+          `Local legacy branch “${name}” contains work not present on the surviving remote feature.`
+        );
+      }
     }
     kind = "active";
     remoteAlreadyMigrated = true;
@@ -328,7 +345,7 @@ async function prepareMigration(
   const desiredRemoteTips = new Map(fetchedRemoteTips);
   const remoteRefUpdates: GitRemoteRefUpdate[] = [];
   if (kind === "active") {
-    const preservedTip = localWip as string;
+    const preservedTip = remoteAlreadyMigrated ? remoteFeature as string : localWip as string;
     desiredRemoteTips.set(configuration.featureBranch, preservedTip);
     desiredRemoteTips.delete(configuration.wipBranch);
     if (!remoteAlreadyMigrated) {

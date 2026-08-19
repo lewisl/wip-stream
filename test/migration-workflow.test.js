@@ -5,7 +5,7 @@ const os = require("os");
 const path = require("path");
 
 const { GitRepository } = require("../out/git");
-const { initializeRepository } = require("../out/generalized-workflow");
+const { commitAndSave, initializeRepository } = require("../out/generalized-workflow");
 const {
   MigrationWorkflowError,
   migrateVersion1Repository,
@@ -199,6 +199,40 @@ async function completedAndStaleCloneMigration() {
   });
 }
 
+async function staleCloneAdoptsAlreadyMigratedRemote() {
+  await usingFixture("migration-already-migrated-stale-", async (f) => {
+    const first = await clone(f, "first");
+    const second = await clone(f, "second");
+    await initialize(first.repo);
+    await initialize(second.repo);
+
+    commit(first.directory, "legacy-work.txt", "legacy work\n", "legacy WIP checkpoint");
+    await saveUp(first.repo);
+    const migratedFeature = tip(first.directory, "wip/feature");
+    await initializeRepository(first.repo);
+
+    commit(first.directory, "post-migration-main.txt", "main work\n", "post-migration main checkpoint");
+    const saved = await commitAndSave(first.repo);
+    assert.equal(saved.published, true);
+    const advancedMain = tip(f.remote, "main");
+    assert.notEqual(tip(second.directory, "main"), advancedMain, "the second clone starts with stale main");
+    assert.notEqual(tip(second.directory, "wip/feature"), migratedFeature, "the second clone starts with stale WIP");
+
+    const result = await migrateVersion1Repository(second.repo);
+    assert.equal(result.migration, "active");
+    assert.equal(result.remoteAlreadyMigrated, true);
+    assert.deepEqual(result.published, [], "adopting an already migrated remote does not publish or rewrite it");
+    assert.equal(tip(second.directory, "main"), advancedMain);
+    assert.equal(tip(second.directory, "feature"), migratedFeature);
+    assert.equal(exists(second.directory, "wip/feature"), false);
+    assert.deepEqual(await readRepositoryConfiguration(second.repo), {
+      kind: "version2",
+      version: "2",
+      remote: "origin",
+    });
+  });
+}
+
 async function refusalStatesAreNonMutating() {
   await usingFixture("migration-partial-", async (f) => {
     const c = await clone(f, "clone");
@@ -237,6 +271,25 @@ async function refusalStatesAreNonMutating() {
     await initialize(c.repo);
     git(c.directory, ["config", "--unset-all", "wipstream.lastKnownRemoteWip"]);
     await expectMigrationError(() => migrateVersion1Repository(c.repo), "MIGRATION_WIP_PROOF_REQUIRED");
+    assert.deepEqual(await listOperationReceipts(c.repo), []);
+  });
+
+  await usingFixture("migration-feature-only-unsafe-", async (f) => {
+    const c = await clone(f, "clone");
+    await initialize(c.repo);
+    commit(c.directory, "unaccepted.txt", "unaccepted WIP\n", "unaccepted WIP checkpoint");
+    await saveUp(c.repo);
+    git(c.directory, ["push", "origin", ":wip/feature"]);
+    const localBefore = heads(c.directory);
+    const remoteBefore = heads(f.remote);
+    const configBefore = config(c.directory);
+    await expectMigrationError(
+      () => migrateVersion1Repository(c.repo),
+      "MIGRATION_ALREADY_MIGRATED_WIP_UNSAFE"
+    );
+    assert.equal(heads(c.directory), localBefore);
+    assert.equal(heads(f.remote), remoteBefore);
+    assert.equal(config(c.directory), configBefore);
     assert.deepEqual(await listOperationReceipts(c.repo), []);
   });
 }
@@ -286,6 +339,7 @@ Promise.resolve()
   .then(activeDefaultPreviewMigrationAndUndo)
   .then(activeCustomNames)
   .then(completedAndStaleCloneMigration)
+  .then(staleCloneAdoptsAlreadyMigratedRemote)
   .then(refusalStatesAreNonMutating)
   .then(cancellationAndRemoteSuccessRetry)
   .then(() => console.log("WipStream version 1 migration tests passed."))

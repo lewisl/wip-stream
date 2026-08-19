@@ -313,7 +313,8 @@ Tests:
 
 - [x] Active default and custom-named streams migrate.
 - [x] Completed streams migrate.
-- [x] Stale second clones migrate or refuse deterministically.
+- [x] A safely stale second clone adopts an already-migrated remote, including
+  later remote-main advances; unpublished or divergent legacy work refuses.
 - [x] Partial and divergent streams change nothing.
 - [x] Migration is previewable, retry-safe, and undoable.
 

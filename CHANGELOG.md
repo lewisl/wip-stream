@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Allow a safely stale version 1 clone to adopt a remote already migrated by
+  another clone, including a remote main advance made afterward. Adoption is
+  local-only for the legacy branch conversion and still refuses unless every
+  legacy tip is contained remotely.
+
 ## 0.2.0
 
 - Generalized WipStream from a fixed main/feature/WIP stream to every ordinary
