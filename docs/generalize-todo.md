@@ -75,30 +75,30 @@ Exit gate:
 
 ## Phase 3: Build plans, local ref transactions, and receipts
 
-- [ ] Represent each compound action as an immutable operation plan with
+- [x] Represent each compound action as an immutable operation plan with
   expected old refs, proposed refs, remote leases, checkout before/after, and
   destructive effects.
-- [ ] Add expected-old-value multi-ref updates using
+- [x] Add expected-old-value multi-ref updates using
   `git update-ref --stdin`.
-- [ ] Define the private operation-receipt directory and JSON schema.
-- [ ] Define internal recovery refs using operation ids and ordinal ref names so
+- [x] Define the private operation-receipt directory and JSON schema.
+- [x] Define internal recovery refs using operation ids and ordinal ref names so
   arbitrary branch names cannot collide.
-- [ ] Record operation phases before and after every mutation boundary.
-- [ ] Add repository inspection for incomplete operations.
-- [ ] Define bounded completed-receipt retention while retaining incomplete
+- [x] Record operation phases before and after every mutation boundary.
+- [x] Add repository inspection for incomplete operations.
+- [x] Define bounded completed-receipt retention while retaining incomplete
   operations until resolved.
-- [ ] Add preview rendering shared by the Output channel and confirmations.
+- [x] Add preview rendering shared by the Output channel and confirmations.
 
 Tests:
 
-- [ ] A mismatched expected local ref aborts the whole local ref transaction.
-- [ ] Receipts survive interruption after every operation phase.
-- [ ] Recovery refs keep rewritten or deleted commits reachable.
-- [ ] Preview changes no project file, ordinary ref, config value, or remote ref.
+- [x] A mismatched expected local ref aborts the whole local ref transaction.
+- [x] Receipts survive interruption after every operation phase.
+- [x] Recovery refs keep rewritten or deleted commits reachable.
+- [x] Preview changes no project file, ordinary ref, config value, or remote ref.
 
 Exit gate:
 
-- [ ] A simulated interruption always yields either the complete before-state,
+- [x] A simulated interruption always yields either the complete before-state,
   the complete after-state, or an inspectable incomplete receipt with all data
   needed to retry or undo.
 

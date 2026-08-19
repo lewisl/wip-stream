@@ -17,7 +17,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 2 are complete. The recorded baseline is in
+- Phases 0 through 3 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -27,6 +27,10 @@
   every mutating workflow plus every Git mutation boundary now enforces exactly
   one worktree. WipStream only lists worktrees; it never creates or manages
   them.
+- `src/operations.ts` provides immutable operation plans, expected-old atomic
+  local ref transactions, ordinal recovery refs, durable phase receipts,
+  incomplete-operation inspection, bounded completed-receipt retention, and
+  side-effect-free preview rendering.
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 3 with immutable operation plans, expected-old-value local ref
-  transactions, recovery refs, and durable operation receipts.
+- Begin Phase 4 by implementing all-or-nothing Get from Remote on top of the
+  inspection, safety, and operation-transaction layers.

@@ -10,6 +10,12 @@ export interface GitRef {
   readonly upstream?: string;
 }
 
+export interface GitRefUpdate {
+  readonly ref: string;
+  readonly expectedOld: string | null;
+  readonly proposed: string | null;
+}
+
 export interface GitWorktree {
   readonly path: string;
   readonly head?: string;
@@ -108,7 +114,7 @@ interface GitResult {
   readonly exitCode: number;
 }
 
-function execute(cwd: string, args: readonly string[]): Promise<GitResult> {
+function execute(cwd: string, args: readonly string[], input?: string): Promise<GitResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", [...args], { cwd, shell: false });
     let stdout = "";
@@ -120,6 +126,9 @@ function execute(cwd: string, args: readonly string[]): Promise<GitResult> {
     child.on("close", (exitCode) => {
       resolve({ stdout, stderr, exitCode: exitCode === null ? 1 : exitCode });
     });
+    if (input !== undefined) {
+      child.stdin.end(input);
+    }
   });
 }
 
@@ -154,6 +163,15 @@ export class GitRepository {
 
   public async tryRun(args: readonly string[]): Promise<GitResult> {
     return execute(this.root, args);
+  }
+
+  private async runWithInput(args: readonly string[], input: string): Promise<string> {
+    const result = await execute(this.root, args, input);
+    if (result.exitCode !== 0) {
+      const output = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+      throw new GitError(args, output || `git ${args.join(" ")} failed.`, result.exitCode);
+    }
+    return result.stdout.trim();
   }
 
   public remoteRef(remote: string, branch: string): string {
@@ -214,6 +232,41 @@ export class GitRepository {
       const [name, objectId, upstream] = line.split("\t");
       return { name, objectId, upstream: upstream || undefined };
     });
+  }
+
+  public async updateRefs(updates: readonly GitRefUpdate[]): Promise<void> {
+    if (!updates.length) {
+      return;
+    }
+    const seen = new Set<string>();
+    const commands: string[] = ["start"];
+    for (const update of updates) {
+      if (seen.has(update.ref)) {
+        throw new GitError(["update-ref", "--stdin"], `Ref “${update.ref}” appears more than once in one transaction.`);
+      }
+      seen.add(update.ref);
+      if (/[\0-\x20\x7f]/.test(update.ref) || (await this.tryRun(["check-ref-format", update.ref])).exitCode !== 0) {
+        throw new GitError(["update-ref", "--stdin"], `“${update.ref}” is not a valid full Git ref name.`);
+      }
+      for (const objectId of [update.expectedOld, update.proposed]) {
+        if (objectId !== null && !/^[0-9a-f]{40,64}$/.test(objectId)) {
+          throw new GitError(["update-ref", "--stdin"], `“${objectId}” is not a valid Git object id.`);
+        }
+      }
+      if (update.expectedOld === null && update.proposed === null) {
+        throw new GitError(["update-ref", "--stdin"], `Ref “${update.ref}” has neither an expected nor proposed value.`);
+      }
+      if (update.expectedOld === null) {
+        commands.push(`create ${update.ref} ${update.proposed}`);
+      } else if (update.proposed === null) {
+        commands.push(`delete ${update.ref} ${update.expectedOld}`);
+      } else {
+        commands.push(`update ${update.ref} ${update.proposed} ${update.expectedOld}`);
+      }
+    }
+    commands.push("prepare", "commit");
+    await this.assertSingleWorktree();
+    await this.runWithInput(["update-ref", "--stdin"], `${commands.join("\n")}\n`);
   }
 
   public async validateBranchName(branch: string): Promise<boolean> {
