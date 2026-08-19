@@ -167,38 +167,38 @@ Exit gate:
 
 ## Phase 6: Implement Commit and Save
 
-- [ ] Save file-backed VS Code documents belonging to the selected repository.
-- [ ] Reject pre-existing Git operations, unresolved conflicts, dirty
+- [x] Save file-backed VS Code documents belonging to the selected repository.
+- [x] Reject pre-existing Git operations, unresolved conflicts, dirty
   submodules, and additional worktrees.
-- [ ] Stage all non-ignored additions, modifications, and deletions.
-- [ ] Prompt for a checkpoint message only when staged content exists.
-- [ ] Create the current-branch checkpoint before network reconciliation.
-- [ ] Preserve staged work when a commit hook rejects the checkpoint.
-- [ ] Fetch and classify all branches after checkpointing.
-- [ ] On true divergence, push nothing, retain the local checkpoint, and return
+- [x] Stage all non-ignored additions, modifications, and deletions.
+- [x] Prompt for a checkpoint message only when staged content exists.
+- [x] Create the current-branch checkpoint before network reconciliation.
+- [x] Preserve staged work when a commit hook rejects the checkpoint.
+- [x] Fetch and classify all branches after checkpointing.
+- [x] On true divergence, push nothing, retain the local checkpoint, and return
   a result that offers Reconcile for current-branch divergence.
-- [ ] Atomically publish all local-ahead and local-only branches with exact
+- [x] Atomically publish all local-ahead and local-only branches with exact
   leases.
-- [ ] Apply unrelated safe remote advances locally.
-- [ ] Verify complete branch parity before reporting a successful handoff.
-- [ ] Emit parent ancestry advisories without blocking continued work.
+- [x] Apply unrelated safe remote advances locally.
+- [x] Verify complete branch parity before reporting a successful handoff.
+- [x] Emit parent ancestry advisories without blocking continued work.
 
 Tests:
 
-- [ ] One Save publishes committed work accumulated on several branches.
-- [ ] Save can publish local work on one branch while retrieving an unrelated
+- [x] One Save publishes committed work accumulated on several branches.
+- [x] Save can publish local work on one branch while retrieving an unrelated
   remote advance on another.
-- [ ] Offline Save retains a local checkpoint and reports that handoff did not
+- [x] Offline Save retains a local checkpoint and reports that handoff did not
   occur.
-- [ ] A remote race rejects the complete atomic push.
-- [ ] Same-branch divergence retains the checkpoint and changes no remote ref.
-- [ ] Direct work on the remote default branch is supported.
+- [x] A remote race rejects the complete atomic push.
+- [x] Same-branch divergence retains the checkpoint and changes no remote ref.
+- [x] Direct work on the remote default branch is supported.
 
 Exit gate:
 
-- [ ] Successful Commit and Save means every ordinary local and remote branch
+- [x] Successful Commit and Save means every ordinary local and remote branch
   name and tip matches.
-- [ ] Every unsuccessful remote handoff explicitly says that another clone must
+- [x] Every unsuccessful remote handoff explicitly says that another clone must
   not resume from the remote yet.
 
 ## Phase 7: Add parent intent and optional lifecycle commands

@@ -17,7 +17,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 5 are complete. The recorded baseline is in
+- Phases 0 through 6 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -41,6 +41,12 @@
   one local transaction, checks out the remote default, and writes version 2
   configuration last. A journaled post-push fetch and stable-state checks make
   partial remote success explicit and retryable.
+- Generalized Commit and Save saves repository documents through its command
+  hook, stages and checkpoints the current branch before network access, then
+  uses the same repository-wide reconciliation engine as Initialize. It
+  publishes all safe local advances atomically, applies unrelated remote
+  advances transactionally, emits parent advisories, records checkpoint
+  recovery metadata, and labels every incomplete handoff “do not resume.”
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 6 by implementing generalized Commit and Save on the shared
-  repository-wide reconciliation behavior established by Initialize.
+- Begin Phase 7 by adding parent-aware Start, Update, Finish, and optional
+  Condense behavior without expanding the three-command normal workflow.

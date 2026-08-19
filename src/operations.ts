@@ -25,6 +25,13 @@ export interface CheckoutTransition {
   readonly after?: string;
 }
 
+export interface CheckpointTransition {
+  readonly branch: string;
+  readonly before: string;
+  readonly after: string;
+  readonly message: string;
+}
+
 export interface DestructiveEffect {
   readonly kind: DestructiveEffectKind;
   readonly ref?: string;
@@ -39,6 +46,7 @@ export interface OperationPlan {
   readonly localRefUpdates: readonly GitRefUpdate[];
   readonly remoteRefUpdates: readonly RemoteRefUpdate[];
   readonly remoteLeases: readonly RemoteLease[];
+  readonly checkpoint?: Readonly<CheckpointTransition>;
   readonly checkout: Readonly<CheckoutTransition>;
   readonly destructiveEffects: readonly DestructiveEffect[];
 }
@@ -50,6 +58,7 @@ export interface OperationPlanInput {
   readonly localRefUpdates?: readonly GitRefUpdate[];
   readonly remoteRefUpdates?: readonly RemoteRefUpdate[];
   readonly remoteLeases?: readonly RemoteLease[];
+  readonly checkpoint?: CheckpointTransition;
   readonly checkout?: CheckoutTransition;
   readonly destructiveEffects?: readonly DestructiveEffect[];
 }
@@ -116,6 +125,7 @@ export function createOperationPlan(input: OperationPlanInput): OperationPlan {
     localRefUpdates: immutableEntries(input.localRefUpdates),
     remoteRefUpdates: immutableEntries(input.remoteRefUpdates),
     remoteLeases: immutableEntries(input.remoteLeases),
+    ...(input.checkpoint ? { checkpoint: Object.freeze({ ...input.checkpoint }) } : {}),
     checkout: Object.freeze({ ...(input.checkout ?? {}) }),
     destructiveEffects: immutableEntries(input.destructiveEffects),
   });
@@ -139,6 +149,12 @@ export function localTransactionUpdates(plan: OperationPlan): readonly GitRefUpd
 
 export function renderOperationPreview(plan: OperationPlan): string {
   const lines = [`WipStream: ${plan.command}`, `Operation: ${plan.operationId}`];
+  if (plan.checkpoint) {
+    lines.push(
+      `Checkpoint: ${plan.checkpoint.branch} ${plan.checkpoint.before} → ${plan.checkpoint.after}`,
+      `Message: ${plan.checkpoint.message}`
+    );
+  }
   if (plan.checkout.before || plan.checkout.after) {
     lines.push(`Checkout: ${plan.checkout.before ?? "detached"} → ${plan.checkout.after ?? "detached"}`);
   }

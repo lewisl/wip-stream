@@ -95,6 +95,7 @@ async function runPlanAndPreviewContract() {
       localRefUpdates: [{ ref: "refs/heads/topic/with/slashes", expectedOld: old, proposed: next }],
       remoteRefUpdates: [{ ref: "refs/heads/topic/with/slashes", proposed: next }],
       remoteLeases: [{ ref: "refs/heads/topic/with/slashes", expected: old }],
+      checkpoint: { branch: "main", before: old, after: next, message: "Checkpoint preview" },
       checkout: { before: "main", after: "topic/with/slashes" },
       destructiveEffects: [{
         kind: "rewrite-local-ref",
@@ -105,6 +106,7 @@ async function runPlanAndPreviewContract() {
     assert.ok(Object.isFrozen(plan));
     assert.ok(Object.isFrozen(plan.localRefUpdates));
     assert.ok(Object.isFrozen(plan.localRefUpdates[0]));
+    assert.ok(Object.isFrozen(plan.checkpoint));
     assert.equal(recoveryRef(plan.operationId, 0), "refs/wipstream/recovery/preview-operation/0000");
     assert.equal(localTransactionUpdates(plan)[0].ref, recoveryRef(plan.operationId, 0));
 
@@ -112,6 +114,7 @@ async function runPlanAndPreviewContract() {
     const preview = renderOperationPreview(plan);
     assert.match(preview, /topic\/with\/slashes/);
     assert.match(preview, /lease/);
+    assert.match(preview, /Checkpoint preview/);
     assert.match(preview, /Recovery snapshots: 1/);
     assert.deepEqual(repositoryState(directory), before, "preview rendering is side-effect free");
     assert.equal(refExists(directory, recoveryRef(plan.operationId, 0)), false);
