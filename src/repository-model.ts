@@ -31,6 +31,7 @@ export interface Version1RepositoryConfiguration {
   readonly mainBranch: string;
   readonly featureBranch: string;
   readonly wipBranch: string;
+  readonly lastKnownRemoteWip?: string;
 }
 
 export interface RepositoryConfiguration {
@@ -92,6 +93,7 @@ export async function readRepositoryConfiguration(repo: GitRepository): Promise<
     return { kind: "uninitialized" };
   }
   if (version === CONFIG_VERSION) {
+    const lastKnownRemoteWip = await repo.getConfig(CONFIG_KEYS.lastKnownRemoteWip);
     return {
       kind: "version1",
       version: CONFIG_VERSION,
@@ -99,6 +101,7 @@ export async function readRepositoryConfiguration(repo: GitRepository): Promise<
       mainBranch: await configOrDefault(repo, CONFIG_KEYS.mainBranch, LEGACY_DEFAULTS.mainBranch),
       featureBranch: await configOrDefault(repo, CONFIG_KEYS.featureBranch, LEGACY_DEFAULTS.featureBranch),
       wipBranch: await configOrDefault(repo, CONFIG_KEYS.wipBranch, LEGACY_DEFAULTS.wipBranch),
+      ...(lastKnownRemoteWip ? { lastKnownRemoteWip } : {}),
     };
   }
   if (version === REPOSITORY_CONFIG_VERSION) {

@@ -10,6 +10,10 @@ import {
 } from "./repository-model";
 import { withRepositoryCommandLock } from "./repository-safety";
 import {
+  Version1MigrationPreview,
+  migrateVersion1RepositoryUnlocked,
+} from "./migration-workflow";
+import {
   applyLocalRefTransaction,
   beginOperation,
   CheckpointTransition,
@@ -47,6 +51,8 @@ export interface GetFromRemoteResult {
 }
 
 export interface InitializeRepositoryHooks {
+  readonly confirmMigrationPreview?: (preview: Version1MigrationPreview) => Promise<boolean>;
+  readonly beforeRemotePush?: () => Promise<void>;
   readonly afterRemotePush?: () => Promise<void>;
 }
 
@@ -524,10 +530,11 @@ async function initializeRepositoryUnlocked(
   await requireStableInitializeRepository(repo);
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind === "version1") {
-    return fail(
-      "VERSION_1_MIGRATION_REQUIRED",
-      "This repository still uses the version 1 stream model. Run the version 1 migration before generalized initialization."
-    );
+    return migrateVersion1RepositoryUnlocked(repo, {
+      confirmPreview: hooks.confirmMigrationPreview,
+      beforeRemotePush: hooks.beforeRemotePush,
+      afterRemotePush: hooks.afterRemotePush,
+    });
   }
   const selectedRemote = requestedRemote?.trim();
   if (requestedRemote !== undefined && !selectedRemote) {

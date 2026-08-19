@@ -293,33 +293,33 @@ Exit gate:
 
 ## Phase 10: Implement version 1 migration
 
-- [ ] Read custom version 1 remote, main, feature, WIP, and last-known-WIP
+- [x] Read custom version 1 remote, main, feature, WIP, and last-known-WIP
   settings.
-- [ ] Validate complete, synchronized `main -> feature -> WIP` topology.
-- [ ] Preview advancing feature to the WIP tip and deleting only the WIP
+- [x] Validate complete, synchronized `main -> feature -> WIP` topology.
+- [x] Preview advancing feature to the WIP tip and deleting only the WIP
   companion name.
-- [ ] Atomically update remote feature and delete remote WIP with exact leases.
-- [ ] Transactionally update local feature and delete local WIP.
-- [ ] Preserve every checkpoint commit and record main as feature's parent.
-- [ ] Handle an already-completed version 1 stream by initializing version 2
+- [x] Atomically update remote feature and delete remote WIP with exact leases.
+- [x] Transactionally update local feature and delete local WIP.
+- [x] Preserve every checkpoint commit and record main as feature's parent.
+- [x] Handle an already-completed version 1 stream by initializing version 2
   normally.
-- [ ] Refuse partial, divergent, rewritten-without-proof, or otherwise
+- [x] Refuse partial, divergent, rewritten-without-proof, or otherwise
   unrecognized old state.
-- [ ] Write version 2 configuration only after migration and reconciliation
+- [x] Write version 2 configuration only after migration and reconciliation
   complete.
-- [ ] Keep legacy command handlers for one compatibility release.
+- [x] Keep legacy command handlers for one compatibility release.
 
 Tests:
 
-- [ ] Active default and custom-named streams migrate.
-- [ ] Completed streams migrate.
-- [ ] Stale second clones migrate or refuse deterministically.
-- [ ] Partial and divergent streams change nothing.
-- [ ] Migration is previewable, retry-safe, and undoable.
+- [x] Active default and custom-named streams migrate.
+- [x] Completed streams migrate.
+- [x] Stale second clones migrate or refuse deterministically.
+- [x] Partial and divergent streams change nothing.
+- [x] Migration is previewable, retry-safe, and undoable.
 
 Exit gate:
 
-- [ ] Every recognized version 1 state has a deterministic migration or
+- [x] Every recognized version 1 state has a deterministic migration or
   non-mutating refusal.
 
 ## Phase 11: UI, documentation, and release verification
