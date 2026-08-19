@@ -239,7 +239,7 @@ async function runBoundaryJournalContract() {
   await withRepository("wipstream-operation-boundaries-", async (_directory, repo) => {
     const plan = createOperationPlan({ operationId: "all-boundaries", command: "All boundaries" });
     await beginOperation(repo, plan);
-    for (const boundary of ["remote-push", "local-refs", "checkout", "configuration"]) {
+    for (const boundary of ["remote-push", "remote-fetch", "local-refs", "checkout", "configuration"]) {
       await withMutationBoundary(repo, plan.operationId, boundary, async () => undefined);
     }
     await completeOperation(repo, plan.operationId);
@@ -248,6 +248,8 @@ async function runBoundaryJournalContract() {
       "planned",
       "before-remote-push",
       "after-remote-push",
+      "before-remote-fetch",
+      "after-remote-fetch",
       "before-local-refs",
       "after-local-refs",
       "before-checkout",

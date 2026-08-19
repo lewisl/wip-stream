@@ -139,30 +139,30 @@ Exit gate:
 
 ## Phase 5: Implement bidirectional Initialize Repository
 
-- [ ] Validate full clone, non-bare state, remote reachability, remote default
+- [x] Validate full clone, non-bare state, remote reachability, remote default
   branch, full branch fetch coverage, and atomic-push capability.
-- [ ] Require a clean, stable, single worktree before bootstrap.
-- [ ] Plan local-ahead/local-only publication and remote-ahead/remote-only local
+- [x] Require a clean, stable, single worktree before bootstrap.
+- [x] Plan local-ahead/local-only publication and remote-ahead/remote-only local
   updates across the whole branch set.
-- [ ] Refuse any same-branch divergence or ambiguous deletion before mutation.
-- [ ] Push all local advances atomically with exact leases.
-- [ ] Apply fetched local changes through the shared local transaction engine.
-- [ ] Check out the remote default branch after successful first initialization.
-- [ ] Write version 2 configuration only after branch reconciliation succeeds.
+- [x] Refuse any same-branch divergence or ambiguous deletion before mutation.
+- [x] Push all local advances atomically with exact leases.
+- [x] Apply fetched local changes through the shared local transaction engine.
+- [x] Check out the remote default branch after successful first initialization.
+- [x] Write version 2 configuration only after branch reconciliation succeeds.
 
 Tests:
 
-- [ ] Fresh clone with several remote branches initializes completely.
-- [ ] Existing repository with unrelated local and remote advances reconciles in
+- [x] Fresh clone with several remote branches initializes completely.
+- [x] Existing repository with unrelated local and remote advances reconciles in
   both directions.
-- [ ] Local-only branches are published.
-- [ ] True divergence changes neither ordinary local nor remote refs.
-- [ ] Remote success followed by injected local failure produces an incomplete
+- [x] Local-only branches are published.
+- [x] True divergence changes neither ordinary local nor remote refs.
+- [x] Remote success followed by injected local failure produces an incomplete
   receipt and a retryable remote-authoritative state.
 
 Exit gate:
 
-- [ ] Successful Init establishes version 2 configuration and complete branch
+- [x] Successful Init establishes version 2 configuration and complete branch
   parity with the remote default checked out.
 
 ## Phase 6: Implement Commit and Save

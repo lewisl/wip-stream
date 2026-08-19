@@ -17,7 +17,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 4 are complete. The recorded baseline is in
+- Phases 0 through 5 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -35,6 +35,12 @@
   Remote: explicit all-head fetch, complete preflight, one atomic ordinary-ref
   update, safe checkout fallback, parity verification, recovery refs, and
   non-blocking parent advisories.
+- Generalized Initialize Repository now reconciles all ordinary branches in
+  both directions, refuses divergence before ordinary-ref mutation, publishes
+  local advances in one exact-leased atomic push, applies remote advances in
+  one local transaction, checks out the remote default, and writes version 2
+  configuration last. A journaled post-push fetch and stable-state checks make
+  partial remote success explicit and retryable.
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 5 by implementing bidirectional Initialize Repository, including
-  full-fetch validation and exact-leased atomic publication.
+- Begin Phase 6 by implementing generalized Commit and Save on the shared
+  repository-wide reconciliation behavior established by Initialize.

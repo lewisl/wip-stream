@@ -16,6 +16,12 @@ export interface GitRefUpdate {
   readonly proposed: string | null;
 }
 
+export interface GitRemoteRefUpdate {
+  readonly ref: string;
+  readonly expected: string | null;
+  readonly proposed: string | null;
+}
+
 export interface GitWorktree {
   readonly path: string;
   readonly head?: string;
@@ -185,6 +191,11 @@ export class GitRepository {
   public async getConfig(key: string): Promise<string | undefined> {
     const result = await this.tryRun(["config", "--local", "--get", key]);
     return result.exitCode === 0 ? result.stdout.trim() : undefined;
+  }
+
+  public async getConfigValues(key: string): Promise<readonly string[]> {
+    const result = await this.tryRun(["config", "--local", "--get-all", key]);
+    return result.exitCode === 0 ? result.stdout.trim().split("\n").filter(Boolean) : [];
   }
 
   public async setConfig(key: string, value: string): Promise<void> {
@@ -408,6 +419,17 @@ export class GitRepository {
     await this.run(["config", "--local", `branch.${branch}.merge`, `refs/heads/${branch}`]);
   }
 
+  public async configureFullBranchFetch(remote: string): Promise<void> {
+    await this.assertSingleWorktree();
+    await this.run([
+      "config",
+      "--local",
+      "--replace-all",
+      `remote.${remote}.fetch`,
+      `+refs/heads/*:refs/remotes/${remote}/*`,
+    ]);
+  }
+
   public async moveBranch(branch: string, target: string): Promise<void> {
     await this.assertSingleWorktree();
     await this.run(["branch", "-f", branch, target]);
@@ -463,6 +485,43 @@ export class GitRepository {
       ([branch, expected]) => `--force-with-lease=refs/heads/${branch}:${expected}`
     );
     await this.run(["push", "--atomic", ...leaseArgs, remote, ...refspecs]);
+  }
+
+  public async pushRefsAtomic(
+    remote: string,
+    updates: readonly GitRemoteRefUpdate[],
+    dryRun = false
+  ): Promise<void> {
+    if (!updates.length) {
+      return;
+    }
+    const seen = new Set<string>();
+    for (const update of updates) {
+      if (seen.has(update.ref)) {
+        throw new GitError(["push", "--atomic"], `Remote ref “${update.ref}” appears more than once.`);
+      }
+      seen.add(update.ref);
+      if (/[\0-\x20\x7f]/.test(update.ref) || (await this.tryRun(["check-ref-format", update.ref])).exitCode !== 0) {
+        throw new GitError(["push", "--atomic"], `“${update.ref}” is not a valid full Git ref name.`);
+      }
+      for (const objectId of [update.expected, update.proposed]) {
+        if (objectId !== null && !/^[0-9a-f]{40,64}$/.test(objectId)) {
+          throw new GitError(["push", "--atomic"], `“${objectId}” is not a valid Git object id.`);
+        }
+      }
+    }
+    const leases = updates.map(
+      (update) => `--force-with-lease=${update.ref}:${update.expected ?? ""}`
+    );
+    const refspecs = updates.map(
+      (update) => `${update.proposed ?? ""}:${update.ref}`
+    );
+    await this.assertSingleWorktree();
+    await this.run(["push", "--atomic", ...(dryRun ? ["--dry-run"] : []), ...leases, remote, ...refspecs]);
+  }
+
+  public async verifyAtomicPushSupport(remote: string, ref: string, objectId: string): Promise<void> {
+    await this.pushRefsAtomic(remote, [{ ref, expected: objectId, proposed: objectId }], true);
   }
 
   public async verifyAtomicPush(remote: string, branch: string): Promise<void> {
