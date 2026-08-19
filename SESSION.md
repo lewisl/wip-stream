@@ -8,6 +8,12 @@
 - The extension uses explicit commands only; it has no background auto-commit, pull, or push behavior.
 - Automated workflow tests pass, including two-computer synchronization, untracked files, cancelled prompts, hook rejection, and dirty submodules.
 
-## Only remaining task
+## Current branch: `generalize`
 
-1. Run the isolated two-window end-to-end live test for the current changes.
+- The generalized multi-stream design and implementation sequence are recorded
+  in `docs/generalize-plan.md`.
+- The current implementation is the version 1 compatibility baseline. Its
+  isolated two-window end-to-end live test is still outstanding.
+- Begin implementation with the first slice described at the end of the plan;
+  keep existing commands and tests passing while separating repository settings
+  from stream-scoped state.
