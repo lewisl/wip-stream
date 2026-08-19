@@ -445,6 +445,42 @@ export class GitRepository {
     await this.run(["switch", branch]);
   }
 
+  public async switchNewBranch(branch: string, startPoint: string): Promise<void> {
+    await this.assertSingleWorktree();
+    await this.run(["switch", "-c", branch, startPoint]);
+  }
+
+  public async merge(branch: string): Promise<void> {
+    await this.assertSingleWorktree();
+    await this.run(["merge", "--no-edit", branch]);
+  }
+
+  public async countCommits(range: string): Promise<number> {
+    const count = Number(await this.run(["rev-list", "--count", range]));
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new GitError(["rev-list", "--count", range], "Git returned an invalid commit count.");
+    }
+    return count;
+  }
+
+  public async createCommitFromTree(treeish: string, parent: string, message: string): Promise<string> {
+    await this.assertSingleWorktree();
+    const tree = await this.run(["rev-parse", `${treeish}^{tree}`]);
+    return this.run(["commit-tree", tree, "-p", parent, "-m", message]);
+  }
+
+  public async removeBranchConfiguration(branch: string): Promise<void> {
+    await this.assertSingleWorktree();
+    const result = await this.tryRun(["config", "--local", "--remove-section", `branch.${branch}`]);
+    if (result.exitCode !== 0 && result.exitCode !== 5) {
+      throw new GitError(
+        ["config", "--local", "--remove-section", `branch.${branch}`],
+        result.stderr.trim() || `Unable to remove configuration for branch “${branch}”.`,
+        result.exitCode
+      );
+    }
+  }
+
   public async fastForward(target: string): Promise<void> {
     await this.assertSingleWorktree();
     await this.run(["merge", "--ff-only", target]);

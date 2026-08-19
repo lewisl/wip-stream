@@ -203,39 +203,39 @@ Exit gate:
 
 ## Phase 7: Add parent intent and optional lifecycle commands
 
-- [ ] Implement Start Branch from the current branch and record that parent.
-- [ ] Carry existing uncommitted files safely to a newly created branch.
-- [ ] For imported branches, assume remote default for advisory status and
+- [x] Implement Start Branch from the current branch and record that parent.
+- [x] Carry existing uncommitted files safely to a newly created branch.
+- [x] For imported branches, assume remote default for advisory status and
   confirm/persist parent intent before a parent-dependent mutation.
-- [ ] Implement the three ancestry states: current with parent, probably already
+- [x] Implement the three ancestry states: current with parent, probably already
   integrated, and parent advanced independently.
-- [ ] Implement Update from Parent using merge, never hidden rebase.
-- [ ] Implement Finish as Save, fetch/recheck, ancestry validation,
+- [x] Implement Update from Parent using merge, never hidden rebase.
+- [x] Implement Finish as Save, fetch/recheck, ancestry validation,
   parent fast-forward, and a retain/delete prompt.
-- [ ] Publish Finish parent update and optional deletion atomically with exact
+- [x] Publish Finish parent update and optional deletion atomically with exact
   leases.
-- [ ] Switch to the parent and mirror the chosen local cleanup only after remote
+- [x] Switch to the parent and mirror the chosen local cleanup only after remote
   success.
-- [ ] Implement explicit Condense with a preview, final message prompt, exact
+- [x] Implement explicit Condense with a preview, final message prompt, exact
   leases, and recovery refs.
-- [ ] Keep Init, Get, and Commit and Save visually primary; add no default
+- [x] Keep Init, Get, and Commit and Save visually primary; add no default
   keybinding for Condense.
 
 Tests:
 
-- [ ] A single user finishes branch A into main and receives a parent-advanced
+- [x] A single user finishes branch A into main and receives a parent-advanced
   advisory while later working on branch B.
-- [ ] Parent advisories do not block Get, Save, or continued editing.
-- [ ] Finish refuses and offers Update when the parent advanced independently.
-- [ ] Finish supports both retained and deleted branch choices.
-- [ ] Condense preserves the branch tree while replacing only branch-exclusive
+- [x] Parent advisories do not block Get, Save, or continued editing.
+- [x] Finish refuses and offers Update when the parent advanced independently.
+- [x] Finish supports both retained and deleted branch choices.
+- [x] Condense preserves the branch tree while replacing only branch-exclusive
   checkpoint history.
 
 Exit gate:
 
-- [ ] The ordinary synchronization workflow still requires only Init, Get, and
+- [x] The ordinary synchronization workflow still requires only Init, Get, and
   Commit and Save.
-- [ ] Lifecycle operations never require the user to type branch-moving Git
+- [x] Lifecycle operations never require the user to type branch-moving Git
   commands.
 
 ## Phase 8: Add divergence and guided conflict handling

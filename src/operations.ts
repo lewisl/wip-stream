@@ -63,7 +63,13 @@ export interface OperationPlanInput {
   readonly destructiveEffects?: readonly DestructiveEffect[];
 }
 
-export type MutationBoundary = "local-refs" | "remote-push" | "remote-fetch" | "checkout" | "configuration";
+export type MutationBoundary =
+  | "local-refs"
+  | "remote-push"
+  | "remote-fetch"
+  | "checkout"
+  | "configuration"
+  | "merge";
 export type OperationPhase = "planned" | `before-${MutationBoundary}` | `after-${MutationBoundary}` | "completed";
 export type OperationStatus = "planned" | "in-progress" | "completed";
 

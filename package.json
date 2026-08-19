@@ -86,7 +86,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "npm run compile && node test/workflow.test.js && node test/v1-characterization.test.js && node test/repository-model.test.js && node test/repository-safety.test.js && node test/operations.test.js && node test/get-from-remote.test.js && node test/initialize-repository.test.js && node test/commit-and-save.test.js",
+    "test": "npm run compile && node test/workflow.test.js && node test/v1-characterization.test.js && node test/repository-model.test.js && node test/repository-safety.test.js && node test/operations.test.js && node test/get-from-remote.test.js && node test/initialize-repository.test.js && node test/commit-and-save.test.js && node test/lifecycle-workflow.test.js",
     "test:live": "npm run package && node test/live.js",
     "test:live:verify": "node test/live.js --verify",
     "test:live:cleanup": "node test/live.js --cleanup",

@@ -17,7 +17,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 6 are complete. The recorded baseline is in
+- Phases 0 through 7 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -47,6 +47,15 @@
   publishes all safe local advances atomically, applies unrelated remote
   advances transactionally, emits parent advisories, records checkpoint
   recovery metadata, and labels every incomplete handoff “do not resume.”
+- `src/lifecycle-workflow.ts` implements optional Start, Update, Finish, and
+  Condense operations. Parent intent is explicit before ancestry mutation;
+  Update fetches then merges; Finish saves first and atomically publishes its
+  parent update plus optional deletion; Condense is previewed, exact-leased,
+  tree-preserving, and protected by recovery refs.
+- TypeScript now explicitly targets ES2020 with Node module resolution and
+  Node/VS Code ambient types, matching the declared VS Code runtime and
+  resolving editor diagnostics for modern array/string methods and Node
+  built-in modules.
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 7 by adding parent-aware Start, Update, Finish, and optional
-  Condense behavior without expanding the three-command normal workflow.
+- Begin Phase 8 by adding contextual Reconcile plus guided Continue and Abort
+  for merge conflicts.

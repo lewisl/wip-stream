@@ -1,10 +1,15 @@
 {
 	"compilerOptions": {
 		"module": "commonjs",
-		"target": "es6",
+		"moduleResolution": "node",
+		"target": "es2020",
 		"outDir": "out",
 		"lib": [
-			"es6"
+			"es2020"
+		],
+		"types": [
+			"node",
+			"vscode"
 		],
 		"sourceMap": true,
 		"rootDir": "src",
