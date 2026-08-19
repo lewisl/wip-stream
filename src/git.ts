@@ -376,6 +376,16 @@ export class GitRepository {
     await this.run(["fetch", "--prune", remote]);
   }
 
+  public async fetchAllBranches(remote: string): Promise<void> {
+    await this.assertSingleWorktree();
+    await this.run([
+      "fetch",
+      "--prune",
+      remote,
+      `+refs/heads/*:refs/remotes/${remote}/*`,
+    ]);
+  }
+
   public async createBranch(branch: string, startPoint: string): Promise<void> {
     await this.assertSingleWorktree();
     await this.run(["branch", branch, startPoint]);
@@ -389,6 +399,13 @@ export class GitRepository {
   public async setUpstream(branch: string, remoteRef: string): Promise<void> {
     await this.assertSingleWorktree();
     await this.run(["branch", "--set-upstream-to", remoteRef, branch]);
+  }
+
+  public async configureTracking(branch: string, remote: string): Promise<void> {
+    await this.assertSingleWorktree();
+    await this.run(["config", "--local", `branch.${branch}.remote`, remote]);
+    await this.assertSingleWorktree();
+    await this.run(["config", "--local", `branch.${branch}.merge`, `refs/heads/${branch}`]);
   }
 
   public async moveBranch(branch: string, target: string): Promise<void> {

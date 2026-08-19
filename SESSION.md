@@ -17,7 +17,7 @@
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 3 are complete. The recorded baseline is in
+- Phases 0 through 4 are complete. The recorded baseline is in
   `docs/v1-baseline.md`, and its executable contract is in
   `test/v1-contract.json`.
 - `src/repository-model.ts` now provides read-only version 1/version 2
@@ -31,6 +31,10 @@
   local ref transactions, ordinal recovery refs, durable phase receipts,
   incomplete-operation inspection, bounded completed-receipt retention, and
   side-effect-free preview rendering.
+- `src/generalized-workflow.ts` now provides transactional generalized Get from
+  Remote: explicit all-head fetch, complete preflight, one atomic ordinary-ref
+  update, safe checkout fallback, parity verification, recovery refs, and
+  non-blocking parent advisories.
 - The isolated two-window end-to-end live test remains a manual release check.
-- Begin Phase 4 by implementing all-or-nothing Get from Remote on top of the
-  inspection, safety, and operation-transaction layers.
+- Begin Phase 5 by implementing bidirectional Initialize Repository, including
+  full-fetch validation and exact-leased atomic publication.

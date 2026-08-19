@@ -104,38 +104,38 @@ Exit gate:
 
 ## Phase 4: Implement transactional Get from Remote
 
-- [ ] Save the current branch name and pre-fetch local/remote-tracking inventory.
-- [ ] Require a stable, clean single worktree.
-- [ ] Fetch and prune every branch from the configured remote.
-- [ ] Treat local-ahead, local-only, diverged, and ambiguous deletion as unsafe
+- [x] Save the current branch name and pre-fetch local/remote-tracking inventory.
+- [x] Require a stable, clean single worktree.
+- [x] Fetch and prune every branch from the configured remote.
+- [x] Treat local-ahead, local-only, diverged, and ambiguous deletion as unsafe
   for Get.
-- [ ] Prove a remote deletion safe only when local tip equals the pre-fetch
+- [x] Prove a remote deletion safe only when local tip equals the pre-fetch
   remote-tracking tip.
-- [ ] Preflight every branch before moving any ordinary local ref.
-- [ ] Create remote-only local branches and configure their tracking relation.
-- [ ] Fast-forward remote-ahead local branches.
-- [ ] Delete only proven-safe stale local branches while retaining recovery refs.
-- [ ] Preserve the prior checkout; if it was safely deleted, select its surviving
+- [x] Preflight every branch before moving any ordinary local ref.
+- [x] Create remote-only local branches and configure their tracking relation.
+- [x] Fast-forward remote-ahead local branches.
+- [x] Delete only proven-safe stale local branches while retaining recovery refs.
+- [x] Preserve the prior checkout; if it was safely deleted, select its surviving
   recorded parent or the remote default.
-- [ ] Verify local branch names and tips equal fetched remote branch names and
+- [x] Verify local branch names and tips equal fetched remote branch names and
   tips before reporting success.
-- [ ] Emit non-blocking parent ancestry advisories after success.
+- [x] Emit non-blocking parent ancestry advisories after success.
 
 Tests:
 
-- [ ] Several safe branches update together.
-- [ ] One unsafe branch prevents every ordinary local branch and working-tree
+- [x] Several safe branches update together.
+- [x] One unsafe branch prevents every ordinary local branch and working-tree
   update.
-- [ ] Fetch may update remote-tracking refs on refusal, but ordinary refs remain
+- [x] Fetch may update remote-tracking refs on refusal, but ordinary refs remain
   unchanged.
-- [ ] Current-branch fast-forward updates files correctly.
-- [ ] Safe deletion of the current branch selects the required fallback.
-- [ ] Repeating a successful or refused Get is idempotent.
+- [x] Current-branch fast-forward updates files correctly.
+- [x] Safe deletion of the current branch selects the required fallback.
+- [x] Repeating a successful or refused Get is idempotent.
 
 Exit gate:
 
-- [ ] Successful Get establishes complete local/remote branch parity.
-- [ ] Refused Get preserves all ordinary local refs and the working tree.
+- [x] Successful Get establishes complete local/remote branch parity.
+- [x] Refused Get preserves all ordinary local refs and the working tree.
 
 ## Phase 5: Implement bidirectional Initialize Repository
 
