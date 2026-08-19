@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Generalized WipStream from a fixed main/feature/WIP stream to every ordinary
   Git branch while keeping Initialize, Get, and Commit and Save as the normal
