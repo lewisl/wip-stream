@@ -9,7 +9,7 @@ VS Code Marketplace.
 
 ## The model
 
-Version 2 supports every ordinary Git branch. A typical repository might look
+WipStream supports every ordinary Git branch. A typical repository might look
 like this:
 
 ```text
@@ -35,10 +35,6 @@ the selected remote and its default branch, full branch fetch coverage, atomic
 push support, a clean working tree, and exactly one worktree. It then safely
 reconciles every ordinary local and remote branch in both directions and checks
 out the remote default branch.
-
-Version 1 migration was retired in WipStream 0.2.2. An overlooked version 1
-clone is detected and refused without changing it; install version 0.2.1,
-migrate it with Initialize Repository, and then reinstall the current version.
 
 ### Get from Remote (`wipstream.resume`)
 

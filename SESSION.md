@@ -11,23 +11,23 @@
   submodules. A rejected Git commit hook leaves staged changes available to fix
   and retry.
 - The extension uses explicit commands only; it has no background auto-commit, pull, or push behavior.
-- Automated version 2 tests pass, including two-computer synchronization,
+- Automated workflow tests pass, including two-computer synchronization,
   unsafe branch states, untracked files, cancelled prompts, hook rejection,
   and dirty submodules.
 
-## Current branch: `generalize`
+## Current branch: `main`
 
 - The approved ordinary-branch design is recorded in
   `docs/generalize-plan.md`.
 - The ordered implementation checklist and acceptance gates are recorded in
   `docs/generalize-todo.md`.
-- Phases 0 through 11 of the original generalization plan are complete. Version
-  1 migration and its compatibility baseline were retired in version 0.2.2
-  after the known repositories were migrated.
-- `src/repository-model.ts` provides version 2 configuration inspection,
-  read-only detection and refusal of the retired version 1 format, parent
-  intent, symbolic remote-default resolution, and complete ordinary-branch
-  inventory with remote-change classification.
+- Phases 0 through 11 of the original generalization plan are complete. The
+  pre-distribution migration implementation and compatibility baseline have
+  been removed.
+- `src/repository-model.ts` distinguishes initialized clones by their selected
+  WipStream remote and provides parent intent, symbolic remote-default
+  resolution, and complete ordinary-branch inventory with remote-change
+  classification.
 - `src/repository-safety.ts` provides the repository-local command lock, and
   every mutating workflow plus every Git mutation boundary now enforces exactly
   one worktree. WipStream only lists worktrees; it never creates or manages
@@ -43,9 +43,10 @@
 - Generalized Initialize Repository now reconciles all ordinary branches in
   both directions, refuses divergence before ordinary-ref mutation, publishes
   local advances in one exact-leased atomic push, applies remote advances in
-  one local transaction, checks out the remote default, and writes version 2
-  configuration last. A journaled post-push fetch and stable-state checks make
-  partial remote success explicit and retryable.
+  one local transaction, checks out the remote default, and writes the selected
+  WipStream remote last to mark the clone initialized. A journaled post-push
+  fetch and stable-state checks make partial remote success explicit and
+  retryable.
 - Generalized Commit and Save saves repository documents through its command
   hook, stages and checkpoints the current branch before network access, then
   uses the same repository-wide reconciliation engine as Initialize. It

@@ -2,7 +2,7 @@
 
 WipStream is a goals-oriented layer over Git. The extension presents a small set of repository workflows while retaining ordinary Git branches, commits, and remotes underneath. It does not maintain a parallel version-control database.
 
-The version 2 model supports every ordinary branch in a repository. A user normally works on one checked-out branch, can consult other branches, and uses the remote to hand committed work between clones. WipStream deliberately requires one worktree per clone. Separate clones on separate computers are supported; multiple Git worktrees in one clone are not.
+The repository model supports every ordinary branch in a repository. A user normally works on one checked-out branch, can consult other branches, and uses the remote to hand committed work between clones. WipStream deliberately requires one worktree per clone. Separate clones on separate computers are supported; multiple Git worktrees in one clone are not.
 
 ## System shape
 
@@ -33,11 +33,11 @@ Only the extension and command-adapter layers depend on the VS Code API. The wor
 
 - [`src/extension.ts`](../src/extension.ts) is the extension entry point. It activates WipStream and delegates command registration.
 - [`src/commands.ts`](../src/commands.ts) is the user-interface adapter. It registers command IDs, selects the repository, saves editor buffers, gathers confirmations and branch names, formats results for the Output panel, and maintains VS Code context keys that control when optional commands appear. Business rules belong in workflow modules rather than here.
-- [`src/constants.ts`](../src/constants.ts) contains the current repository configuration version, the legacy-version detector, and shared Git configuration keys.
+- [`src/constants.ts`](../src/constants.ts) contains shared Git configuration keys.
 
 ### Workflow modules
 
-- [`src/generalized-workflow.ts`](../src/generalized-workflow.ts) implements the three normal version 2 workflows: **Initialize Repository**, **Get from Remote**, and **Commit and Save**. It inventories all ordinary branches, classifies their local and remote relationships, rejects unsafe combinations before changing ordinary state, performs synchronized updates, verifies the result, and reports parent-branch advisories.
+- [`src/generalized-workflow.ts`](../src/generalized-workflow.ts) implements the three normal workflows: **Initialize Repository**, **Get from Remote**, and **Commit and Save**. It inventories all ordinary branches, classifies their local and remote relationships, rejects unsafe combinations before changing ordinary state, performs synchronized updates, verifies the result, and reports parent-branch advisories.
 - [`src/lifecycle-workflow.ts`](../src/lifecycle-workflow.ts) implements optional branch-lifecycle operations: **Start Branch**, **Update from Parent**, **Finish Branch**, and **Condense Branch**. A branch's parent is recorded as intent, not inferred repeatedly from history. Updating from a parent uses a merge; history is not silently rebased or rewritten.
 - [`src/conflict-workflow.ts`](../src/conflict-workflow.ts) handles cases that need a human decision: **Reconcile with Remote**, **Continue Pending Merge**, and **Abort Pending Merge**. It records enough pre-merge state to verify that an abort restores the intended state.
 - [`src/undo-workflow.ts`](../src/undo-workflow.ts) implements exact-state **Undo Last Action**. Undo is available only for the newest eligible completed operation and only while the repository still matches that operation's recorded after-state. Remote reversal uses leases, so work that appeared later is not overwritten.
@@ -47,7 +47,7 @@ Some workflow modules intentionally compose others. For example, lifecycle actio
 ### Repository and transaction infrastructure
 
 - [`src/git.ts`](../src/git.ts) is the low-level Git command facade. It runs the Git executable and provides typed operations for refs, branch relationships, status, commits, checkouts, merges, fetching, exact leased pushes, and multi-ref transactions. It also enforces the single-worktree rule before mutation. This module may inspect `git worktree list`, but WipStream never creates or manages worktrees.
-- [`src/repository-model.ts`](../src/repository-model.ts) translates raw refs and Git configuration into the model used by workflows. It reads version 2 configuration, explicitly refuses the retired version 1 format, inventories branch tips before and after fetch, classifies branch relationships and remote changes, resolves the remote's default branch, and reads or records parent intent.
+- [`src/repository-model.ts`](../src/repository-model.ts) translates raw refs and Git configuration into the model used by workflows. It distinguishes initialized clones by their selected WipStream remote, inventories branch tips before and after fetch, classifies branch relationships and remote changes, resolves the remote's default branch, and reads or records parent intent.
 - [`src/repository-safety.ts`](../src/repository-safety.ts) serializes WipStream commands within a clone. Its repository-local command lock detects another running command and leaves stale locks visible for deliberate inspection after interruption.
 - [`src/operations.ts`](../src/operations.ts) provides operation plans, receipts, mutation-boundary journaling, recovery refs, local ref transactions, previews, and incomplete-operation inspection. Compound workflows describe their intended mutations before applying them. This gives recovery and Undo code a concrete record of what was expected and what actually completed.
 
@@ -59,7 +59,7 @@ WipStream uses several kinds of state, each for a different purpose:
 | --- | --- | --- |
 | Ordinary work | `refs/heads/*` and the working tree | Normal Git branches, commits, staged files, and uncommitted files |
 | Remote observations | `refs/remotes/<remote>/*` | Last fetched view used to classify what changed remotely |
-| Repository configuration | local Git config under `wipstream.*` | Configuration version and selected remote |
+| Repository configuration | local Git config under `wipstream.*` | Selected remote and initialized/uninitialized state |
 | Parent intent | local Git config under `branch.<name>.wipstreamParent` | The branch that **Update from Parent** and **Finish Branch** should use |
 | Command lock | the common Git directory at `wipstream/command.lock` | Prevents concurrent WipStream mutations in one clone |
 | Operation receipts | the common Git directory at `wipstream/operations/*.json` | Records plans, boundaries, outcomes, and pending recovery work |
@@ -71,7 +71,7 @@ The remote is the durable handoff point between computers. **Commit and Save** c
 
 ## How a compound operation works
 
-The details vary by command, but mutation-heavy version 2 workflows follow the same shape:
+The details vary by command, but mutation-heavy workflows follow the same shape:
 
 1. Acquire the repository command lock and verify that the clone has exactly one worktree.
 2. Check command-specific preconditions, such as a clean or stable working state.
@@ -81,7 +81,7 @@ The details vary by command, but mutation-heavy version 2 workflows follow the s
 6. Write an operation receipt before crossing a mutation boundary.
 7. Push remote changes atomically with exact leases when the command publishes or deletes remote refs. Refetch and verify the result.
 8. Apply related local ref changes with one `git update-ref --stdin` transaction using expected old object IDs. Recovery refs preserve displaced commit tips.
-9. Apply checkout and Git-configuration transitions only after the remote and local ref boundaries are safe. Their exact order is command-specific; initial version 2 configuration is deferred until branch reconciliation has succeeded.
+9. Apply checkout and Git-configuration transitions only after the remote and local ref boundaries are safe. Their exact order is command-specific; writing the selected WipStream remote, which marks the clone initialized, is deferred until branch reconciliation has succeeded.
 10. Verify postconditions such as local/remote parity, record the after-state, and complete the receipt.
 
 Expected-old checks and remote leases turn an unnoticed concurrent change into a refusal instead of an overwrite. Receipts remain incomplete when an operation stops inside a recoverable boundary, allowing the extension to offer only the recovery action appropriate to the recorded state.

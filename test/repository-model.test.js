@@ -96,13 +96,9 @@ async function runConfigurationAndParentIntent() {
     const first = await cloneRepository(fixture, "first");
     assert.deepEqual(await readRepositoryConfiguration(first.repo), { kind: "uninitialized" });
 
-    git(first.directory, ["config", "--local", "wipstream.version", "99"]);
-    await expectModelError(() => readRepositoryConfiguration(first.repo), "UNSUPPORTED_CONFIG_VERSION");
-
     await writeRepositoryConfiguration(first.repo, { remote: "origin" });
     assert.deepEqual(await readRepositoryConfiguration(first.repo), {
-      kind: "version2",
-      version: "2",
+      kind: "initialized",
       remote: "origin",
     });
     await setBranchParent(first.repo, "topic/with-slash", "main");
@@ -115,18 +111,16 @@ async function runConfigurationAndParentIntent() {
 async function runMutationFreeInspection() {
   await withFixture("wipstream-model-inspection-", async (fixture) => {
     const first = await cloneRepository(fixture, "first");
-    git(first.directory, ["config", "--local", "wipstream.version", "1"]);
-    const beforeLegacy = repositoryState(first.directory);
-    await expectModelError(() => readRepositoryConfiguration(first.repo), "LEGACY_VERSION_UNSUPPORTED");
-    await expectModelError(() => inspectRepository(first.repo), "LEGACY_VERSION_UNSUPPORTED");
-    assert.deepEqual(repositoryState(first.directory), beforeLegacy, "legacy-version refusal is read-only");
+    const beforeInitialization = repositoryState(first.directory);
+    await expectModelError(() => inspectRepository(first.repo), "NOT_INITIALIZED");
+    assert.deepEqual(repositoryState(first.directory), beforeInitialization, "uninitialized inspection is read-only");
 
     await writeRepositoryConfiguration(first.repo, { remote: "origin" });
-    const beforeV2 = repositoryState(first.directory);
-    const v2 = await inspectRepository(first.repo);
-    assert.equal(v2.configuration.kind, "version2");
-    assert.equal(v2.remoteDefaultBranch, "main");
-    assert.deepEqual(repositoryState(first.directory), beforeV2, "version 2 inspection is read-only");
+    const beforeInspection = repositoryState(first.directory);
+    const inspection = await inspectRepository(first.repo);
+    assert.equal(inspection.configuration.kind, "initialized");
+    assert.equal(inspection.remoteDefaultBranch, "main");
+    assert.deepEqual(repositoryState(first.directory), beforeInspection, "initialized inspection is read-only");
   });
 }
 

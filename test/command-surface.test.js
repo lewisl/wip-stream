@@ -12,7 +12,7 @@ const primary = [
   { id: "wipstream.saveup", title: "Commit and Save", key: "ctrl+w s" },
 ];
 const contextual = [
-  ["wipstream.start", "wipstream.version2"],
+  ["wipstream.start", "wipstream.initialized"],
   ["wipstream.finish", "wipstream.finishAvailable"],
   ["wipstream.update", "wipstream.updateAvailable"],
   ["wipstream.reconcile", "wipstream.reconcileAvailable"],

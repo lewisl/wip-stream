@@ -1,5 +1,5 @@
 import { GitError, GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
-import { CONFIG_KEYS, REPOSITORY_CONFIG_VERSION } from "./constants";
+import { CONFIG_KEYS } from "./constants";
 import {
   BranchInventoryEntry,
   getBranchParent,
@@ -528,13 +528,13 @@ async function initializeRepositoryUnlocked(
   if (requestedRemote !== undefined && !selectedRemote) {
     return fail("INVALID_REMOTE", "Initialize Repository requires a non-empty remote name.");
   }
-  if (configuration.kind === "version2" && selectedRemote && selectedRemote !== configuration.remote) {
+  if (configuration.kind === "initialized" && selectedRemote && selectedRemote !== configuration.remote) {
     return fail(
       "REMOTE_MISMATCH",
       `This repository is initialized for remote “${configuration.remote}”, not “${selectedRemote}”.`
     );
   }
-  const remote = configuration.kind === "version2" ? configuration.remote : selectedRemote ?? "origin";
+  const remote = configuration.kind === "initialized" ? configuration.remote : selectedRemote ?? "origin";
   await repo.ensureRemote(remote);
   const currentBranch = await repo.currentBranch();
   if (!currentBranch) {
@@ -573,11 +573,6 @@ async function initializeRepositoryUnlocked(
     },
     ...await trackingConfigurationChanges(repo, remote, synchronizedBranches),
     { key: CONFIG_KEYS.remote, before: await repo.getConfigValues(CONFIG_KEYS.remote), after: [remote] },
-    {
-      key: CONFIG_KEYS.version,
-      before: await repo.getConfigValues(CONFIG_KEYS.version),
-      after: [REPOSITORY_CONFIG_VERSION],
-    },
   ];
   return applyBidirectionalReconciliation(repo, {
     command: "Initialize Repository",
@@ -605,8 +600,8 @@ async function commitAndSaveUnlocked(
   await hooks.saveDocuments?.();
   await requireStableSaveRepository(repo);
   const configuration = await readRepositoryConfiguration(repo);
-  if (configuration.kind !== "version2") {
-    return fail("VERSION_2_REQUIRED", "Run Initialize Repository before using Commit and Save.");
+  if (configuration.kind !== "initialized") {
+    return fail("NOT_INITIALIZED", "Run Initialize Repository before using Commit and Save.");
   }
   await repo.ensureRemote(configuration.remote);
   const currentBranch = await repo.currentBranch();
@@ -774,8 +769,8 @@ export async function getFromRemote(repo: GitRepository): Promise<GetFromRemoteR
 async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemoteResult> {
   await requireStableGetRepository(repo);
   const configuration = await readRepositoryConfiguration(repo);
-  if (configuration.kind !== "version2") {
-    return fail("VERSION_2_REQUIRED", "Run Initialize Repository before using Get from Remote.");
+  if (configuration.kind !== "initialized") {
+    return fail("NOT_INITIALIZED", "Run Initialize Repository before using Get from Remote.");
   }
   await repo.ensureRemote(configuration.remote);
   const currentBranch = await repo.currentBranch();

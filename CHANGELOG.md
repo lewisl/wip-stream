@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+- Simplified clone initialization to use the selected `wipstream.remote` as the
+  durable initialized/uninitialized marker.
+- Removed repository-version guards and the retired version 1 compatibility
+  refusal from the runtime and tests.
+- Renamed the version-specific VS Code context to the stable
+  `wipstream.initialized` context.
+
 ## 0.2.2
 
 - Removed the version 1 workflow, migration implementation, compatibility

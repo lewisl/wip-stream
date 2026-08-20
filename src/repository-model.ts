@@ -1,4 +1,4 @@
-import { CONFIG_KEYS, LEGACY_REPOSITORY_CONFIG_VERSION, REPOSITORY_CONFIG_VERSION } from "./constants";
+import { CONFIG_KEYS } from "./constants";
 import { BranchRelation as GitBranchRelation, GitRef, GitRepository } from "./git";
 
 export const INTERNAL_REF_PREFIX = "refs/wipstream/";
@@ -18,8 +18,7 @@ export interface UninitializedRepositoryConfiguration {
 }
 
 export interface RepositoryConfiguration {
-  readonly kind: "version2";
-  readonly version: typeof REPOSITORY_CONFIG_VERSION;
+  readonly kind: "initialized";
   readonly remote: string;
 }
 
@@ -66,27 +65,11 @@ function branchParentKey(branch: string): string {
 }
 
 export async function readRepositoryConfiguration(repo: GitRepository): Promise<ReadRepositoryConfiguration> {
-  const version = await repo.getConfig(CONFIG_KEYS.version);
-  if (!version) {
+  const remote = await repo.getConfig(CONFIG_KEYS.remote);
+  if (!remote) {
     return { kind: "uninitialized" };
   }
-  if (version === LEGACY_REPOSITORY_CONFIG_VERSION) {
-    return fail(
-      "LEGACY_VERSION_UNSUPPORTED",
-      "This clone uses WipStream version 1. Install WipStream 0.2.1, run Initialize Repository to migrate it, then reinstall the current version."
-    );
-  }
-  if (version === REPOSITORY_CONFIG_VERSION) {
-    const remote = await repo.getConfig(CONFIG_KEYS.remote);
-    if (!remote) {
-      fail("INVALID_REPOSITORY_CONFIG", "WipStream version 2 configuration does not name a remote.");
-    }
-    return { kind: "version2", version: REPOSITORY_CONFIG_VERSION, remote };
-  }
-  return fail(
-    "UNSUPPORTED_CONFIG_VERSION",
-    `This repository uses unsupported WipStream configuration version “${version}”.`
-  );
+  return { kind: "initialized", remote };
 }
 
 export async function writeRepositoryConfiguration(
@@ -98,7 +81,6 @@ export async function writeRepositoryConfiguration(
     fail("INVALID_REPOSITORY_CONFIG", "WipStream requires a selected remote.");
   }
   await repo.setConfig(CONFIG_KEYS.remote, remote);
-  await repo.setConfig(CONFIG_KEYS.version, REPOSITORY_CONFIG_VERSION);
 }
 
 export async function getBranchParent(repo: GitRepository, branch: string): Promise<string | undefined> {
@@ -242,7 +224,7 @@ export async function inspectRepository(
   previousRemoteTips: ReadonlyMap<string, string> = new Map()
 ): Promise<RepositoryInspection> {
   const configuration = await readRepositoryConfiguration(repo);
-  if (configuration.kind !== "version2") {
+  if (configuration.kind !== "initialized") {
     return fail("NOT_INITIALIZED", "Initialize this repository before inspecting its WipStream branch model.");
   }
   return {

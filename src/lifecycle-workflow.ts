@@ -119,8 +119,8 @@ async function requireLifecycleRepository(repo: GitRepository, requireClean: boo
     );
   }
   const configuration = await readRepositoryConfiguration(repo);
-  if (configuration.kind !== "version2") {
-    fail("VERSION_2_REQUIRED", "Run Initialize Repository before using lifecycle commands.");
+  if (configuration.kind !== "initialized") {
+    fail("NOT_INITIALIZED", "Run Initialize Repository before using lifecycle commands.");
   }
   return configuration.remote;
 }

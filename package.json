@@ -3,7 +3,7 @@
   "displayName": "WipStream",
   "publisher": "lewisl",
   "description": "Use git to synchronize feature development across several computers.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "extensionKind": [
     "workspace"
   ],
@@ -113,7 +113,7 @@
       "commandPalette": [
         {
           "command": "wipstream.start",
-          "when": "wipstream.version2"
+          "when": "wipstream.initialized"
         },
         {
           "command": "wipstream.finish",

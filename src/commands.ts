@@ -32,7 +32,7 @@ import {
 import { inspectUndoEligibility, undoLastAction } from "./undo-workflow";
 
 const CONTEXT_KEYS = [
-  "wipstream.version2",
+  "wipstream.initialized",
   "wipstream.finishAvailable",
   "wipstream.updateAvailable",
   "wipstream.reconcileAvailable",
@@ -221,8 +221,8 @@ async function refreshCommandContexts(preferred?: GitRepository): Promise<void> 
 
   try {
     const configuration = await readRepositoryConfiguration(repo);
-    if (configuration.kind !== "version2") return;
-    await setContext("wipstream.version2", true);
+    if (configuration.kind !== "initialized") return;
+    await setContext("wipstream.initialized", true);
     const pending = await inspectPendingMerge(repo);
     await setContext("wipstream.pendingMerge", Boolean(pending));
     if (pending) return;

@@ -116,8 +116,8 @@ async function requireReconcileRepository(repo: GitRepository): Promise<{ remote
     return fail("INCOMPLETE_WIPSTREAM_OPERATION", `Inspect operation “${incomplete[0].plan.operationId}” first.`);
   }
   const configuration = await readRepositoryConfiguration(repo);
-  if (configuration.kind !== "version2") {
-    return fail("VERSION_2_REQUIRED", "Run Initialize Repository before Reconcile.");
+  if (configuration.kind !== "initialized") {
+    return fail("NOT_INITIALIZED", "Run Initialize Repository before Reconcile.");
   }
   const branch = await repo.currentBranch();
   if (!branch) {
