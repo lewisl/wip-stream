@@ -2,6 +2,8 @@
 
 WipStream is a goals-oriented layer over Git. The extension presents a small set of repository workflows while retaining ordinary Git branches, commits, and remotes underneath. It does not maintain a parallel version-control database.
 
+For the small Git recipe underlying the ordinary workflows and the safety machinery wrapped around it, see [`git-task-structure.md`](git-task-structure.md). For a call-by-call map of Initialize Repository, Get from Remote, and Commit and Save, including their return values and mutation boundaries, see [`ordinary-command-control-flow.md`](ordinary-command-control-flow.md).
+
 The repository model supports every ordinary branch in a repository. A user normally works on one checked-out branch, can consult other branches, and uses the remote to hand committed work between clones. WipStream deliberately requires one worktree per clone. Separate clones on separate computers are supported; multiple Git worktrees in one clone are not.
 
 ## System shape
