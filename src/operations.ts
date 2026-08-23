@@ -1,7 +1,8 @@
 import { randomUUID } from "crypto";
 import { link, mkdir, open, readdir, readFile, rename, unlink } from "fs/promises";
 import * as path from "path";
-import { GitRefUpdate, GitRepository } from "./git";
+import { fail, WipStreamError } from "./errors";
+import { GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
 
 export type DestructiveEffectKind =
   | "delete-local-ref"
@@ -9,16 +10,6 @@ export type DestructiveEffectKind =
   | "rewrite-local-ref"
   | "rewrite-remote-ref"
   | "replace-checkout";
-
-export interface RemoteRefUpdate {
-  readonly ref: string;
-  readonly proposed: string | null;
-}
-
-export interface RemoteLease {
-  readonly ref: string;
-  readonly expected: string | null;
-}
 
 export interface CheckoutTransition {
   readonly before?: string;
@@ -53,13 +44,12 @@ export interface DestructiveEffect {
 }
 
 export interface OperationPlan {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly operationId: string;
   readonly command: string;
   readonly createdAt: string;
   readonly localRefUpdates: readonly GitRefUpdate[];
-  readonly remoteRefUpdates: readonly RemoteRefUpdate[];
-  readonly remoteLeases: readonly RemoteLease[];
+  readonly remoteRefUpdates: readonly GitRemoteRefUpdate[];
   readonly checkpoint?: Readonly<CheckpointTransition>;
   readonly configurationChanges: readonly Readonly<ConfigurationTransition>[];
   readonly checkout: Readonly<CheckoutTransition>;
@@ -71,8 +61,7 @@ export interface OperationPlanInput {
   readonly command: string;
   readonly createdAt?: string;
   readonly localRefUpdates?: readonly GitRefUpdate[];
-  readonly remoteRefUpdates?: readonly RemoteRefUpdate[];
-  readonly remoteLeases?: readonly RemoteLease[];
+  readonly remoteRefUpdates?: readonly GitRemoteRefUpdate[];
   readonly checkpoint?: CheckpointTransition;
   readonly configurationChanges?: readonly ConfigurationTransition[];
   readonly checkout?: CheckoutTransition;
@@ -117,19 +106,7 @@ export interface OperationReceipt {
   readonly completedAt?: string;
 }
 
-export class OperationError extends Error {
-  public readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "OperationError";
-    this.code = code;
-  }
-}
-
-function fail(code: string, message: string): never {
-  throw new OperationError(code, message);
-}
+export { WipStreamError as OperationError };
 
 function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error
@@ -154,13 +131,12 @@ export function createOperationPlan(input: OperationPlanInput): OperationPlan {
     return fail("INVALID_OPERATION_PLAN", "A WipStream operation plan must name its command.");
   }
   return Object.freeze({
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     operationId,
     command: input.command,
     createdAt: input.createdAt ?? new Date().toISOString(),
     localRefUpdates: immutableEntries(input.localRefUpdates),
     remoteRefUpdates: immutableEntries(input.remoteRefUpdates),
-    remoteLeases: immutableEntries(input.remoteLeases),
     ...(input.checkpoint ? { checkpoint: Object.freeze({ ...input.checkpoint }) } : {}),
     configurationChanges: Object.freeze((input.configurationChanges ?? []).map((change) => Object.freeze({
       key: change.key,
@@ -208,9 +184,8 @@ export function renderOperationPreview(plan: OperationPlan): string {
   if (plan.remoteRefUpdates.length) {
     lines.push("Remote refs:");
     for (const update of plan.remoteRefUpdates) {
-      const lease = plan.remoteLeases.find((candidate) => candidate.ref === update.ref);
       lines.push(
-        `  ${update.ref}: → ${update.proposed ?? "deleted"} (lease ${lease ? lease.expected ?? "must not exist" : "missing"})`
+        `  ${update.ref}: → ${update.proposed ?? "deleted"} (lease ${update.expected ?? "must not exist"})`
       );
     }
   }
@@ -238,18 +213,116 @@ export async function operationReceiptPath(repo: GitRepository, operationId: str
   return path.join(await operationReceiptDirectory(repo), `${operationId}.json`);
 }
 
-function isOperationReceipt(value: unknown): value is OperationReceipt {
-  if (typeof value !== "object" || value === null) {
-    return false;
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isObjectIdOrNull(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function normalizeRemoteRefUpdates(plan: Record<string, unknown>): readonly GitRemoteRefUpdate[] | undefined {
+  if (!Array.isArray(plan.remoteRefUpdates)) {
+    return undefined;
   }
-  const receipt = value as Partial<OperationReceipt>;
-  return receipt.schemaVersion === 1
-    && typeof receipt.plan === "object"
-    && receipt.plan !== null
-    && typeof receipt.plan.operationId === "string"
-    && typeof receipt.phase === "string"
-    && ["planned", "in-progress", "completed", "aborted", "undone"].includes(String(receipt.status))
-    && Array.isArray(receipt.events);
+  const updates = plan.remoteRefUpdates;
+  const seen = new Set<string>();
+  if (plan.schemaVersion === 2) {
+    const normalized: GitRemoteRefUpdate[] = [];
+    for (const update of updates) {
+      if (!isObject(update)
+        || typeof update.ref !== "string"
+        || seen.has(update.ref)
+        || !isObjectIdOrNull(update.expected)
+        || !isObjectIdOrNull(update.proposed)) {
+        return undefined;
+      }
+      seen.add(update.ref);
+      normalized.push({ ref: update.ref, expected: update.expected, proposed: update.proposed });
+    }
+    return normalized;
+  }
+  if (plan.schemaVersion !== 1 || !Array.isArray(plan.remoteLeases)) {
+    return undefined;
+  }
+  const leases = new Map<string, string | null>();
+  for (const lease of plan.remoteLeases) {
+    if (!isObject(lease)
+      || typeof lease.ref !== "string"
+      || leases.has(lease.ref)
+      || !isObjectIdOrNull(lease.expected)) {
+      return undefined;
+    }
+    leases.set(lease.ref, lease.expected);
+  }
+  const normalized: GitRemoteRefUpdate[] = [];
+  for (const update of updates) {
+    if (!isObject(update)
+      || typeof update.ref !== "string"
+      || seen.has(update.ref)
+      || !isObjectIdOrNull(update.proposed)
+      || !leases.has(update.ref)) {
+      return undefined;
+    }
+    seen.add(update.ref);
+    normalized.push({
+      ref: update.ref,
+      expected: leases.get(update.ref) as string | null,
+      proposed: update.proposed,
+    });
+  }
+  return leases.size === normalized.length ? normalized : undefined;
+}
+
+function normalizeOperationPlan(value: unknown): OperationPlan | undefined {
+  if (!isObject(value)
+    || (value.schemaVersion !== 1 && value.schemaVersion !== 2)
+    || typeof value.operationId !== "string"
+    || !validOperationId(value.operationId)
+    || typeof value.command !== "string"
+    || !value.command.trim()
+    || typeof value.createdAt !== "string"
+    || !Array.isArray(value.localRefUpdates)
+    || !Array.isArray(value.configurationChanges)
+    || !isObject(value.checkout)
+    || !Array.isArray(value.destructiveEffects)
+    || (value.checkpoint !== undefined && !isObject(value.checkpoint))) {
+    return undefined;
+  }
+  const remoteRefUpdates = normalizeRemoteRefUpdates(value);
+  if (!remoteRefUpdates) {
+    return undefined;
+  }
+  try {
+    return createOperationPlan({
+      operationId: value.operationId,
+      command: value.command,
+      createdAt: value.createdAt,
+      localRefUpdates: value.localRefUpdates as unknown as readonly GitRefUpdate[],
+      remoteRefUpdates,
+      checkpoint: value.checkpoint as unknown as CheckpointTransition | undefined,
+      configurationChanges: value.configurationChanges as unknown as readonly ConfigurationTransition[],
+      checkout: value.checkout as unknown as CheckoutTransition,
+      destructiveEffects: value.destructiveEffects as unknown as readonly DestructiveEffect[],
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeOperationReceipt(value: unknown): OperationReceipt | undefined {
+  if (!isObject(value)
+    || value.schemaVersion !== 1
+    || typeof value.phase !== "string"
+    || !["planned", "in-progress", "completed", "aborted", "undone"].includes(String(value.status))
+    || !Array.isArray(value.events)) {
+    return undefined;
+  }
+  const plan = normalizeOperationPlan(value.plan);
+  if (!plan) {
+    return undefined;
+  }
+  return Object.freeze({ ...value, plan }) as unknown as OperationReceipt;
 }
 
 async function writeReceipt(receiptPath: string, receipt: OperationReceipt, createOnly: boolean): Promise<void> {
@@ -288,10 +361,11 @@ export async function readOperationReceipt(repo: GitRepository, operationId: str
   } catch (error) {
     return fail("INVALID_OPERATION_RECEIPT", `WipStream could not read operation receipt ${receiptPath}: ${error}`);
   }
-  if (!isOperationReceipt(value) || value.plan.operationId !== operationId) {
+  const receipt = normalizeOperationReceipt(value);
+  if (!receipt || receipt.plan.operationId !== operationId) {
     return fail("INVALID_OPERATION_RECEIPT", `WipStream operation receipt ${receiptPath} is invalid.`);
   }
-  return value;
+  return receipt;
 }
 
 export async function beginOperation(repo: GitRepository, plan: OperationPlan): Promise<OperationReceipt> {

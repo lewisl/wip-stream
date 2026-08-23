@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import { existsSync } from "fs";
 import * as path from "path";
+import { WipStreamError } from "./errors";
 
 export type BranchRelation = "equal" | "behind" | "ahead" | "diverged";
 
@@ -32,7 +33,7 @@ export interface GitWorktree {
   readonly prunable?: string;
 }
 
-export class GitWorktreeError extends Error {
+export class GitWorktreeError extends WipStreamError {
   public readonly code = "ADDITIONAL_WORKTREES";
   public readonly worktrees: readonly GitWorktree[];
 
@@ -41,7 +42,10 @@ export class GitWorktreeError extends Error {
       const state = worktree.branch ? `branch ${worktree.branch}` : worktree.detached ? "detached HEAD" : "no branch";
       return `• ${worktree.path} (${state}${worktree.head ? `, ${worktree.head}` : ""})`;
     });
-    super(`WipStream requires exactly one worktree. Remove the additional Git worktrees before retrying:\n${details.join("\n")}`);
+    super(
+      "ADDITIONAL_WORKTREES",
+      `WipStream requires exactly one worktree. Remove the additional Git worktrees before retrying:\n${details.join("\n")}`
+    );
     this.name = "GitWorktreeError";
     this.worktrees = worktrees;
   }
@@ -102,15 +106,25 @@ export function parseWorktreePorcelain(output: string): readonly GitWorktree[] {
   return result;
 }
 
-export class GitError extends Error {
+export class GitError extends WipStreamError {
   public readonly args: readonly string[];
   public readonly exitCode: number | undefined;
+  public readonly signal: NodeJS.Signals | undefined;
+  public readonly cancelled: boolean;
 
-  constructor(args: readonly string[], message: string, exitCode?: number) {
-    super(message);
+  constructor(
+    args: readonly string[],
+    message: string,
+    exitCode?: number,
+    signal?: NodeJS.Signals,
+    cancelled = false
+  ) {
+    super(cancelled ? "GIT_COMMAND_CANCELLED" : signal ? "GIT_COMMAND_TERMINATED" : "GIT_COMMAND_FAILED", message);
     this.name = "GitError";
     this.args = args;
     this.exitCode = exitCode;
+    this.signal = signal;
+    this.cancelled = cancelled;
   }
 }
 
@@ -120,29 +134,86 @@ interface GitResult {
   readonly exitCode: number;
 }
 
-function execute(cwd: string, args: readonly string[], input?: string): Promise<GitResult> {
+interface GitExecutionOptions {
+  readonly input?: string;
+  readonly signal?: AbortSignal;
+}
+
+function execute(cwd: string, args: readonly string[], options: GitExecutionOptions = {}): Promise<GitResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn("git", [...args], { cwd, shell: false });
+    const { input, signal } = options;
+    const child = spawn("git", [...args], {
+      cwd,
+      shell: false,
+      signal,
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let cancellationRequested = false;
 
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on("error", (error) => reject(new GitError(args, error.message)));
-    child.on("close", (exitCode) => {
-      resolve({ stdout, stderr, exitCode: exitCode === null ? 1 : exitCode });
+    const rejectOnce = (error: GitError) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    child.on("error", (error) => {
+      const cancelled = signal?.aborted || error.name === "AbortError";
+      if (cancelled) {
+        cancellationRequested = true;
+        return;
+      }
+      rejectOnce(new GitError(
+        args,
+        error.message
+      ));
+    });
+    child.on("close", (exitCode, closeSignal) => {
+      if (settled) {
+        return;
+      }
+      const cancelled = cancellationRequested || Boolean(signal?.aborted && closeSignal);
+      if (cancelled) {
+        rejectOnce(new GitError(
+          args,
+          `git ${args.join(" ")} was cancelled.`,
+          exitCode ?? undefined,
+          closeSignal ?? undefined,
+          true
+        ));
+        return;
+      }
+      if (exitCode === null) {
+        rejectOnce(new GitError(
+          args,
+          `git ${args.join(" ")} was terminated${closeSignal ? ` by ${closeSignal}` : ""}.`,
+          undefined,
+          closeSignal ?? undefined,
+          false
+        ));
+        return;
+      }
+      settled = true;
+      resolve({ stdout, stderr, exitCode });
     });
     if (input !== undefined) {
-      child.stdin.end(input);
+      child.stdin?.end(input);
     }
   });
 }
 
 export class GitRepository {
   public readonly root: string;
+  private readonly networkSignal: AbortSignal | undefined;
 
-  private constructor(root: string) {
+  private constructor(root: string, networkSignal?: AbortSignal) {
     this.root = root;
+    this.networkSignal = networkSignal;
   }
 
   public static async open(directory: string): Promise<GitRepository> {
@@ -172,7 +243,7 @@ export class GitRepository {
   }
 
   private async runWithInput(args: readonly string[], input: string): Promise<string> {
-    const result = await execute(this.root, args, input);
+    const result = await execute(this.root, args, { input });
     if (result.exitCode !== 0) {
       const output = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
       throw new GitError(args, output || `git ${args.join(" ")} failed.`, result.exitCode);
@@ -180,7 +251,40 @@ export class GitRepository {
     return result.stdout.trim();
   }
 
-  public remoteRef(remote: string, branch: string): string {
+  private async runNetwork(args: readonly string[]): Promise<string> {
+    const result = await execute(this.root, args, { signal: this.networkSignal });
+    if (result.exitCode !== 0) {
+      const output = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+      throw new GitError(args, output || `git ${args.join(" ")} failed.`, result.exitCode);
+    }
+    return result.stdout.trim();
+  }
+
+  private async mutate(args: readonly string[]): Promise<string> {
+    await this.assertSingleWorktree();
+    return this.run(args);
+  }
+
+  private async tryMutate(args: readonly string[]): Promise<GitResult> {
+    await this.assertSingleWorktree();
+    return this.tryRun(args);
+  }
+
+  private async mutateWithInput(args: readonly string[], input: string): Promise<string> {
+    await this.assertSingleWorktree();
+    return this.runWithInput(args, input);
+  }
+
+  private async mutateNetwork(args: readonly string[]): Promise<string> {
+    await this.assertSingleWorktree();
+    return this.runNetwork(args);
+  }
+
+  public withNetworkCancellation(signal: AbortSignal): GitRepository {
+    return new GitRepository(this.root, signal);
+  }
+
+  public remoteTrackingRef(remote: string, branch: string): string {
     return `refs/remotes/${remote}/${branch}`;
   }
 
@@ -199,19 +303,16 @@ export class GitRepository {
   }
 
   public async setConfig(key: string, value: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["config", "--local", key, value]);
+    await this.mutate(["config", "--local", key, value]);
   }
 
   public async replaceConfigValues(key: string, values: readonly string[]): Promise<void> {
-    await this.assertSingleWorktree();
-    const unset = await this.tryRun(["config", "--local", "--unset-all", key]);
+    const unset = await this.tryMutate(["config", "--local", "--unset-all", key]);
     if (unset.exitCode !== 0 && unset.exitCode !== 5) {
       throw new GitError(["config", "--local", "--unset-all", key], unset.stderr.trim(), unset.exitCode);
     }
     for (const value of values) {
-      await this.assertSingleWorktree();
-      await this.run(["config", "--local", "--add", key, value]);
+      await this.mutate(["config", "--local", "--add", key, value]);
     }
   }
 
@@ -288,8 +389,7 @@ export class GitRepository {
       }
     }
     commands.push("prepare", "commit");
-    await this.assertSingleWorktree();
-    await this.runWithInput(["update-ref", "--stdin"], `${commands.join("\n")}\n`);
+    await this.mutateWithInput(["update-ref", "--stdin"], `${commands.join("\n")}\n`);
   }
 
   public async validateBranchName(branch: string): Promise<boolean> {
@@ -399,18 +499,16 @@ export class GitRepository {
     return false;
   }
 
-  public async ensureRemote(remote: string): Promise<void> {
+  public async requireConfiguredRemote(remote: string): Promise<void> {
     await this.run(["remote", "get-url", remote]);
   }
 
   public async fetch(remote: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["fetch", "--prune", remote]);
+    await this.mutateNetwork(["fetch", "--prune", remote]);
   }
 
   public async fetchAllBranches(remote: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run([
+    await this.mutateNetwork([
       "fetch",
       "--prune",
       remote,
@@ -419,30 +517,24 @@ export class GitRepository {
   }
 
   public async createBranch(branch: string, startPoint: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["branch", branch, startPoint]);
+    await this.mutate(["branch", branch, startPoint]);
   }
 
   public async createTrackingBranch(branch: string, remoteRef: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["branch", "--track", branch, remoteRef]);
+    await this.mutate(["branch", "--track", branch, remoteRef]);
   }
 
   public async setUpstream(branch: string, remoteRef: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["branch", "--set-upstream-to", remoteRef, branch]);
+    await this.mutate(["branch", "--set-upstream-to", remoteRef, branch]);
   }
 
   public async configureTracking(branch: string, remote: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["config", "--local", `branch.${branch}.remote`, remote]);
-    await this.assertSingleWorktree();
-    await this.run(["config", "--local", `branch.${branch}.merge`, `refs/heads/${branch}`]);
+    await this.mutate(["config", "--local", `branch.${branch}.remote`, remote]);
+    await this.mutate(["config", "--local", `branch.${branch}.merge`, `refs/heads/${branch}`]);
   }
 
   public async configureFullBranchFetch(remote: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run([
+    await this.mutate([
       "config",
       "--local",
       "--replace-all",
@@ -452,38 +544,31 @@ export class GitRepository {
   }
 
   public async moveBranch(branch: string, target: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["branch", "-f", branch, target]);
+    await this.mutate(["branch", "-f", branch, target]);
   }
 
   public async detach(): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["switch", "--detach"]);
+    await this.mutate(["switch", "--detach"]);
   }
 
   public async switch(branch: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["switch", branch]);
+    await this.mutate(["switch", branch]);
   }
 
   public async switchNewBranch(branch: string, startPoint: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["switch", "-c", branch, startPoint]);
+    await this.mutate(["switch", "-c", branch, startPoint]);
   }
 
   public async merge(branch: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["merge", "--no-edit", branch]);
+    await this.mutate(["merge", "--no-edit", branch]);
   }
 
   public async commitMerge(): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["commit", "--no-edit"]);
+    await this.mutate(["commit", "--no-edit"]);
   }
 
   public async abortMerge(): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["merge", "--abort"]);
+    await this.mutate(["merge", "--abort"]);
   }
 
   public async countCommits(range: string): Promise<number> {
@@ -495,22 +580,19 @@ export class GitRepository {
   }
 
   public async createCommitFromTree(treeish: string, parent: string, message: string): Promise<string> {
-    await this.assertSingleWorktree();
     const tree = await this.run(["rev-parse", `${treeish}^{tree}`]);
-    return this.run(["commit-tree", tree, "-p", parent, "-m", message]);
+    return this.mutate(["commit-tree", tree, "-p", parent, "-m", message]);
   }
 
   public async restoreCommitChanges(before: string, after: string): Promise<void> {
-    await this.assertSingleWorktree();
     const patch = await this.run(["diff", "--binary", before, after]);
     if (patch) {
-      await this.runWithInput(["apply"], `${patch}\n`);
+      await this.mutateWithInput(["apply"], `${patch}\n`);
     }
   }
 
   public async removeBranchConfiguration(branch: string): Promise<void> {
-    await this.assertSingleWorktree();
-    const result = await this.tryRun(["config", "--local", "--remove-section", `branch.${branch}`]);
+    const result = await this.tryMutate(["config", "--local", "--remove-section", `branch.${branch}`]);
     if (result.exitCode !== 0 && result.exitCode !== 5) {
       throw new GitError(
         ["config", "--local", "--remove-section", `branch.${branch}`],
@@ -521,13 +603,11 @@ export class GitRepository {
   }
 
   public async fastForward(target: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["merge", "--ff-only", target]);
+    await this.mutate(["merge", "--ff-only", target]);
   }
 
   public async stageAll(): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["add", "--all"]);
+    await this.mutate(["add", "--all"]);
   }
 
   public async hasStagedChanges(): Promise<boolean> {
@@ -546,8 +626,7 @@ export class GitRepository {
   }
 
   public async commit(message: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["commit", "-m", message]);
+    await this.mutate(["commit", "-m", message]);
   }
 
   public async pushAtomic(
@@ -555,11 +634,10 @@ export class GitRepository {
     refspecs: readonly string[],
     leases: Readonly<Record<string, string>> = {}
   ): Promise<void> {
-    await this.assertSingleWorktree();
     const leaseArgs = Object.entries(leases).map(
       ([branch, expected]) => `--force-with-lease=refs/heads/${branch}:${expected}`
     );
-    await this.run(["push", "--atomic", ...leaseArgs, remote, ...refspecs]);
+    await this.mutateNetwork(["push", "--atomic", ...leaseArgs, remote, ...refspecs]);
   }
 
   public async pushRefsAtomic(
@@ -591,8 +669,7 @@ export class GitRepository {
     const refspecs = updates.map(
       (update) => `${update.proposed ?? ""}:${update.ref}`
     );
-    await this.assertSingleWorktree();
-    await this.run(["push", "--atomic", ...(dryRun ? ["--dry-run"] : []), ...leases, remote, ...refspecs]);
+    await this.mutateNetwork(["push", "--atomic", ...(dryRun ? ["--dry-run"] : []), ...leases, remote, ...refspecs]);
   }
 
   public async verifyAtomicPushSupport(remote: string, ref: string, objectId: string): Promise<void> {
@@ -600,14 +677,12 @@ export class GitRepository {
   }
 
   public async verifyAtomicPush(remote: string, branch: string): Promise<void> {
-    await this.assertSingleWorktree();
-    await this.run(["push", "--atomic", "--dry-run", remote, `${branch}:${branch}`]);
+    await this.mutateNetwork(["push", "--atomic", "--dry-run", remote, `${branch}:${branch}`]);
   }
 
   public async deleteLocalBranch(branch: string): Promise<void> {
     if (await this.branchExists(branch)) {
-      await this.assertSingleWorktree();
-      await this.run(["branch", "-d", branch]);
+      await this.mutate(["branch", "-d", branch]);
     }
   }
 }

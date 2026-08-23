@@ -1,11 +1,12 @@
 import { GitError, GitRepository } from "./git";
+import { fail, WipStreamError } from "./errors";
 import { commitAndSave, CommitAndSaveHooks, CommitAndSaveResult } from "./generalized-workflow";
 import {
   inspectBranchInventory,
   readRepositoryConfiguration,
-  snapshotRemoteTips,
+  snapshotRemoteTrackingTips,
 } from "./repository-model";
-import { withRepositoryCommandLock } from "./repository-safety";
+import { requireRepositoryPreflight, withRepositoryCommandLock } from "./repository-safety";
 import {
   OperationReceipt,
   PendingMerge,
@@ -21,15 +22,7 @@ import {
   withMutationBoundary,
 } from "./operations";
 
-export class ConflictWorkflowError extends Error {
-  public readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "ConflictWorkflowError";
-    this.code = code;
-  }
-}
+export { WipStreamError as ConflictWorkflowError };
 
 export interface PendingMergeStatus {
   readonly operationId: string;
@@ -62,10 +55,6 @@ export interface AbortMergeResult {
 
 export interface AbortMergeHooks {
   readonly afterGitAbort?: () => Promise<void>;
-}
-
-function fail(code: string, message: string): never {
-  throw new ConflictWorkflowError(code, message);
 }
 
 function status(receipt: OperationReceipt): PendingMergeStatus {
@@ -101,20 +90,11 @@ export async function inspectPendingMerge(repo: GitRepository): Promise<PendingM
 }
 
 async function requireReconcileRepository(repo: GitRepository): Promise<{ remote: string; branch: string }> {
-  await repo.assertSingleWorktree();
-  if (await repo.isBare() || await repo.isShallow()) {
-    return fail("UNSUPPORTED_REPOSITORY", "Reconcile requires a complete, non-bare working repository.");
-  }
-  if (await repo.operationInProgress() || await repo.hasConflicts()) {
-    return fail("GIT_OPERATION_IN_PROGRESS", "Resolve or abort the current Git operation before Reconcile.");
-  }
-  if ((await repo.statusPorcelain()).trim()) {
-    return fail("DIRTY_WORKTREE", "Reconcile requires the locally checkpointed branch to have a clean working tree.");
-  }
-  const incomplete = await inspectIncompleteOperations(repo);
-  if (incomplete.length) {
-    return fail("INCOMPLETE_WIPSTREAM_OPERATION", `Inspect operation “${incomplete[0].plan.operationId}” first.`);
-  }
+  await requireRepositoryPreflight(repo, {
+    command: "Reconcile with Remote",
+    cleanWorktree: true,
+    cleanSubmodules: false,
+  });
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind !== "initialized") {
     return fail("NOT_INITIALIZED", "Run Initialize Repository before Reconcile.");
@@ -144,7 +124,7 @@ export async function reconcileWithRemote(
 
 async function reconcileWithRemoteUnlocked(repo: GitRepository): Promise<ReconcileResult> {
   const { remote, branch } = await requireReconcileRepository(repo);
-  const previous = await snapshotRemoteTips(repo, remote);
+  const previous = await snapshotRemoteTrackingTips(repo, remote);
   await repo.fetchAllBranches(remote);
   const inventory = await inspectBranchInventory(repo, remote, previous);
   const current = inventory.find((candidate) => candidate.name === branch);
@@ -167,7 +147,7 @@ async function reconcileWithRemoteUnlocked(repo: GitRepository): Promise<Reconci
   const before = await repo.hash(repo.localRef(branch));
   const preIndexTree = await repo.indexTree();
   const preStatus = await repo.statusPorcelain();
-  const mergeTarget = repo.remoteRef(remote, branch);
+  const mergeTarget = repo.remoteTrackingRef(remote, branch);
   const plan = createOperationPlan({
     command: "Reconcile with Remote",
     checkout: { before: branch, after: branch },

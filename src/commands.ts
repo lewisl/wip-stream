@@ -1,6 +1,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { EXTENSION_NAME } from "./constants";
+import { WipStreamError } from "./errors";
 import {
   abortPendingMerge,
   continuePendingMerge,
@@ -15,7 +16,7 @@ import {
   getFromRemote,
   initializeRepository,
 } from "./generalized-workflow";
-import { GitRepository } from "./git";
+import { GitError, GitRepository } from "./git";
 import {
   CondensePreview,
   FinishBranchDisposition,
@@ -27,8 +28,9 @@ import {
 import {
   getBranchParent,
   readRepositoryConfiguration,
-  resolveRemoteDefaultBranch,
+  resolveRemoteTrackingDefaultBranch,
 } from "./repository-model";
+import { inspectIncompleteOperations } from "./operations";
 import { inspectUndoEligibility, undoLastAction } from "./undo-workflow";
 
 const CONTEXT_KEYS = [
@@ -40,16 +42,6 @@ const CONTEXT_KEYS = [
   "wipstream.undoAvailable",
   "wipstream.condenseAvailable",
 ] as const;
-
-class CommandUiError extends Error {
-  public readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "CommandUiError";
-    this.code = code;
-  }
-}
 
 function isWithin(root: string, file: string): boolean {
   const relative = path.relative(root, file);
@@ -90,22 +82,22 @@ async function repositoryCandidates(): Promise<GitRepository[]> {
 
 let activeRepository: GitRepository | undefined;
 
-async function selectRepository(): Promise<GitRepository> {
+async function selectRepository(networkSignal?: AbortSignal): Promise<GitRepository> {
   const candidates = await repositoryCandidates();
   if (candidates.length === 0) {
-    throw new CommandUiError("NO_REPOSITORY", "No Git repository is available for the active editor or workspace.");
+    throw new WipStreamError("NO_REPOSITORY", "No Git repository is available for the active editor or workspace.");
   }
   if (candidates.length === 1) {
     activeRepository = candidates[0];
-    return candidates[0];
+    return networkSignal ? candidates[0].withNetworkCancellation(networkSignal) : candidates[0];
   }
   const choice = await vscode.window.showQuickPick(
     candidates.map((repo) => ({ label: path.basename(repo.root), description: repo.root, repo })),
     { placeHolder: "Choose the repository WipStream should use" }
   );
-  if (!choice) throw new CommandUiError("CANCELLED", "WipStream command cancelled.");
+  if (!choice) throw new WipStreamError("CANCELLED", "WipStream command cancelled.");
   activeRepository = choice.repo;
-  return choice.repo;
+  return networkSignal ? choice.repo.withNetworkCancellation(networkSignal) : choice.repo;
 }
 
 function repositoryDocuments(repo: GitRepository): vscode.TextDocument[] {
@@ -117,7 +109,7 @@ function repositoryDocuments(repo: GitRepository): vscode.TextDocument[] {
 async function saveRepositoryDocuments(repo: GitRepository): Promise<void> {
   for (const document of repositoryDocuments(repo)) {
     if (document.isDirty && !(await document.save())) {
-      throw new CommandUiError(
+      throw new WipStreamError(
         "SAVE_FAILED",
         `VS Code could not save ${path.relative(repo.root, document.uri.fsPath)}.`
       );
@@ -128,7 +120,7 @@ async function saveRepositoryDocuments(repo: GitRepository): Promise<void> {
 function assertNoDirtyDocuments(repo: GitRepository): void {
   const dirty = repositoryDocuments(repo).find((document) => document.isDirty);
   if (dirty) {
-    throw new CommandUiError(
+    throw new WipStreamError(
       "UNSAVED_EDITOR_WORK",
       `Unsaved editor work exists in ${path.relative(repo.root, dirty.uri.fsPath)}. Save it before retrieving remote files.`
     );
@@ -137,8 +129,8 @@ function assertNoDirtyDocuments(repo: GitRepository): void {
 
 async function askValue(prompt: string, value: string): Promise<string> {
   const result = await vscode.window.showInputBox({ prompt, value, ignoreFocusOut: true });
-  if (result === undefined) throw new CommandUiError("CANCELLED", "WipStream command cancelled.");
-  if (!result.trim()) throw new CommandUiError("INVALID_INPUT", "WipStream names cannot be blank.");
+  if (result === undefined) throw new WipStreamError("CANCELLED", "WipStream command cancelled.");
+  if (!result.trim()) throw new WipStreamError("INVALID_INPUT", "WipStream names cannot be blank.");
   return result.trim();
 }
 
@@ -230,12 +222,12 @@ async function refreshCommandContexts(preferred?: GitRepository): Promise<void> 
     await setContext("wipstream.undoAvailable", (await inspectUndoEligibility(repo)).eligible);
     const branch = await repo.currentBranch();
     if (!branch) return;
-    const remoteDefault = await resolveRemoteDefaultBranch(repo, configuration.remote);
+    const remoteDefault = await resolveRemoteTrackingDefaultBranch(repo, configuration.remote);
     const isFeatureBranch = branch !== remoteDefault;
     await setContext("wipstream.finishAvailable", isFeatureBranch);
     await setContext("wipstream.condenseAvailable", isFeatureBranch);
 
-    const remoteRef = repo.remoteRef(configuration.remote, branch);
+    const remoteRef = repo.remoteTrackingRef(configuration.remote, branch);
     if (await repo.refExists(remoteRef)) {
       await setContext(
         "wipstream.reconcileAvailable",
@@ -256,16 +248,37 @@ async function refreshCommandContexts(preferred?: GitRepository): Promise<void> 
 async function runCommand(
   output: vscode.OutputChannel,
   title: string,
-  action: () => Promise<void>
+  cancellable: boolean,
+  action: (networkSignal: AbortSignal) => Promise<void>
 ): Promise<void> {
   try {
     output.appendLine(`${new Date().toISOString()}  START  ${title}`);
     await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `WipStream: ${title}`, cancellable: false },
-      action
+      { location: vscode.ProgressLocation.Notification, title: `WipStream: ${title}`, cancellable },
+      async (_progress, token) => {
+        const controller = new AbortController();
+        const subscription = token.onCancellationRequested(() => controller.abort());
+        try {
+          await action(controller.signal);
+        } finally {
+          subscription.dispose();
+        }
+      }
     );
   } catch (error) {
-    await showError(output, error);
+    if (error instanceof GitError && error.cancelled) {
+      const incomplete = activeRepository
+        ? await inspectIncompleteOperations(activeRepository)
+        : [];
+      await showError(output, incomplete.length
+        ? new WipStreamError(
+          "INCOMPLETE_WIPSTREAM_OPERATION",
+          `Network activity was cancelled during operation “${incomplete[0].plan.operationId}”. Inspect it before continuing.`
+        )
+        : new WipStreamError("CANCELLED", `${title} was cancelled before an operation began.`));
+    } else {
+      await showError(output, error);
+    }
   } finally {
     await refreshCommandContexts(activeRepository);
   }
@@ -331,14 +344,19 @@ async function runFinish(output: vscode.OutputChannel, repo: GitRepository): Pro
 export function registerCommands(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("WipStream");
   context.subscriptions.push(output);
-  const register = (name: string, title: string, action: () => Promise<void>) => {
+  const register = (
+    name: string,
+    title: string,
+    cancellable: boolean,
+    action: (networkSignal: AbortSignal) => Promise<void>
+  ) => {
     context.subscriptions.push(vscode.commands.registerCommand(`${EXTENSION_NAME}.${name}`, () =>
-      runCommand(output, title, action)
+      runCommand(output, title, cancellable, action)
     ));
   };
 
-  register("init", "Initialize Repository", async () => {
-    const repo = await selectRepository();
+  register("init", "Initialize Repository", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     await saveRepositoryDocuments(repo);
     const configuration = await readRepositoryConfiguration(repo);
     const requestedRemote = configuration.kind === "uninitialized"
@@ -354,8 +372,8 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
-  register("resume", "Get from Remote", async () => {
-    const repo = await selectRepository();
+  register("resume", "Get from Remote", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     assertNoDirtyDocuments(repo);
     const result = await getFromRemote(repo);
     appendAdvisories(output, result.advisories);
@@ -368,13 +386,13 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
-  register("saveup", "Commit and Save", async () => {
-    const repo = await selectRepository();
+  register("saveup", "Commit and Save", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     await reportSave(output, await commitAndSave(repo, saveHooks(repo)));
   });
 
-  register("start", "Start Branch", async () => {
-    const repo = await selectRepository();
+  register("start", "Start Branch", false, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     const branch = await askValue("New branch name", "change");
     const result = await startBranch(repo, branch);
     showSuccess(
@@ -386,14 +404,14 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
-  register("finish", "Finish Branch", async () => {
-    const repo = await selectRepository();
+  register("finish", "Finish Branch", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     await saveRepositoryDocuments(repo);
     await runFinish(output, repo);
   });
 
-  register("update", "Update from Parent", async () => {
-    const repo = await selectRepository();
+  register("update", "Update from Parent", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     assertNoDirtyDocuments(repo);
     const result = await updateFromParent(repo, selectParent);
     if (result.pending && result.operationId) {
@@ -409,8 +427,8 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
-  register("reconcile", "Reconcile with Remote", async () => {
-    const repo = await selectRepository();
+  register("reconcile", "Reconcile with Remote", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     assertNoDirtyDocuments(repo);
     const result = await reconcileWithRemote(repo, saveHooks(repo));
     if (result.pending) {
@@ -423,8 +441,8 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     if (result.save) await reportSave(output, result.save);
   });
 
-  register("continue", "Continue Pending Merge", async () => {
-    const repo = await selectRepository();
+  register("continue", "Continue Pending Merge", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     await saveRepositoryDocuments(repo);
     const result = await continuePendingMerge(repo, saveHooks(repo));
     output.appendLine(
@@ -433,16 +451,16 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     await reportSave(output, result.save);
   });
 
-  register("abort", "Abort Pending Merge", async () => {
-    const repo = await selectRepository();
+  register("abort", "Abort Pending Merge", false, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     const pending = await inspectPendingMerge(repo);
-    if (!pending) throw new CommandUiError("NO_PENDING_MERGE", "No WipStream merge is pending.");
+    if (!pending) throw new WipStreamError("NO_PENDING_MERGE", "No WipStream merge is pending.");
     const confirmed = await vscode.window.showWarningMessage(
       `Abort ${pending.command} on “${pending.branch}” and restore its exact pre-merge state?`,
       { modal: true },
       "Abort Merge"
     );
-    if (confirmed !== "Abort Merge") throw new CommandUiError("CANCELLED", "Abort was cancelled.");
+    if (confirmed !== "Abort Merge") throw new WipStreamError("CANCELLED", "Abort was cancelled.");
     const result = await abortPendingMerge(repo);
     showSuccess(
       output,
@@ -453,18 +471,18 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
-  register("undo", "Undo Last Action", async () => {
-    const repo = await selectRepository();
+  register("undo", "Undo Last Action", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     const eligibility = await inspectUndoEligibility(repo);
     if (!eligibility.eligible || !eligibility.operationId) {
-      throw new CommandUiError("UNDO_NOT_ELIGIBLE", eligibility.reason ?? "The latest action is not undoable.");
+      throw new WipStreamError("UNDO_NOT_ELIGIBLE", eligibility.reason ?? "The latest action is not undoable.");
     }
     const confirmed = await vscode.window.showWarningMessage(
       `Undo the exact completed WipStream action “${eligibility.command}” (${eligibility.operationId})?`,
       { modal: true },
       "Undo Action"
     );
-    if (confirmed !== "Undo Action") throw new CommandUiError("CANCELLED", "Undo was cancelled.");
+    if (confirmed !== "Undo Action") throw new WipStreamError("CANCELLED", "Undo was cancelled.");
     const result = await undoLastAction(repo);
     showSuccess(
       output,
@@ -475,8 +493,8 @@ export function registerCommands(context: vscode.ExtensionContext): void {
     );
   });
 
-  register("condense", "Condense Branch (Advanced)", async () => {
-    const repo = await selectRepository();
+  register("condense", "Condense Branch (Advanced)", true, async (networkSignal) => {
+    const repo = await selectRepository(networkSignal);
     assertNoDirtyDocuments(repo);
     const result = await condenseBranch(repo, {
       selectParent,

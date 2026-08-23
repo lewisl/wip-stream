@@ -22,6 +22,8 @@ const contextual = [
   ["wipstream.condense", "wipstream.condenseAvailable"],
 ];
 const removedLegacy = ["wipstream.tofeature", "wipstream.tomain"];
+const cancellable = ["init", "resume", "saveup", "finish", "update", "reconcile", "continue", "undo", "condense"];
+const localOnly = ["start", "abort"];
 
 const declared = new Map(packageJson.contributes.commands.map(({ command, title }) => [command, title]));
 for (const { id, title } of primary) assert.equal(declared.get(id), title);
@@ -51,5 +53,12 @@ assert.match(commandsSource, /operation=\$\{operationId\}/, "Output records incl
 assert.doesNotMatch(commandsSource, /confirmMigrationPreview/, "Initialize has no migration UI");
 assert.match(commandsSource, /inspectPendingMerge/, "pending merge context is inspected");
 assert.match(commandsSource, /inspectUndoEligibility/, "Undo visibility uses exact eligibility");
+for (const command of cancellable) {
+  assert.match(commandsSource, new RegExp(`register\\("${command}", [^\\n]+, true,`), `${command} exposes network cancellation`);
+}
+for (const command of localOnly) {
+  assert.match(commandsSource, new RegExp(`register\\("${command}", [^\\n]+, false,`), `${command} remains non-cancellable`);
+}
+assert.equal(packageJson.dependencies?.["@firecrawl/anydoc-wasm"], undefined, "unused runtime dependency is absent");
 
 console.log("WipStream generalized VS Code command-surface tests passed.");

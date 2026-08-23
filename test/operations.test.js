@@ -93,8 +93,7 @@ async function runPlanAndPreviewContract() {
       operationId: "preview-operation",
       command: "Preview Test",
       localRefUpdates: [{ ref: "refs/heads/topic/with/slashes", expectedOld: old, proposed: next }],
-      remoteRefUpdates: [{ ref: "refs/heads/topic/with/slashes", proposed: next }],
-      remoteLeases: [{ ref: "refs/heads/topic/with/slashes", expected: old }],
+      remoteRefUpdates: [{ ref: "refs/heads/topic/with/slashes", expected: old, proposed: next }],
       checkpoint: { branch: "main", before: old, after: next, message: "Checkpoint preview" },
       checkout: { before: "main", after: "topic/with/slashes" },
       destructiveEffects: [{
@@ -103,6 +102,7 @@ async function runPlanAndPreviewContract() {
         description: "Replace the local topic tip",
       }],
     });
+    assert.equal(plan.schemaVersion, 2);
     assert.ok(Object.isFrozen(plan));
     assert.ok(Object.isFrozen(plan.localRefUpdates));
     assert.ok(Object.isFrozen(plan.localRefUpdates[0]));
@@ -125,6 +125,74 @@ async function runPlanAndPreviewContract() {
       "INVALID_OPERATION_ID"
     );
   });
+}
+
+async function runLegacyRemoteLeaseCompatibility() {
+  await withRepository("wipstream-operation-legacy-", async (directory, repo) => {
+    const old = ref(directory, "main");
+    const next = commitTree(directory, old, "Legacy transition");
+    const current = createOperationPlan({
+      operationId: "legacy-plan",
+      command: "Legacy Plan",
+      remoteRefUpdates: [{ ref: "refs/heads/main", expected: old, proposed: next }],
+    });
+    const legacy = {
+      ...current,
+      schemaVersion: 1,
+      remoteRefUpdates: current.remoteRefUpdates.map(({ ref: name, proposed }) => ({ ref: name, proposed })),
+      remoteLeases: current.remoteRefUpdates.map(({ ref: name, expected }) => ({ ref: name, expected })),
+    };
+    await beginOperation(repo, legacy);
+    const receiptPath = await operationReceiptPath(repo, legacy.operationId);
+    const persistedBeforeRead = readFileSync(receiptPath, "utf8");
+    const [inspected] = await inspectIncompleteOperations(repo);
+    assert.equal(inspected.plan.schemaVersion, 2);
+    assert.deepEqual(inspected.plan.remoteRefUpdates, current.remoteRefUpdates);
+    const normalized = await readOperationReceipt(repo, legacy.operationId);
+    assert.equal(normalized.plan.schemaVersion, 2);
+    assert.deepEqual(normalized.plan.remoteRefUpdates, current.remoteRefUpdates);
+    assert.match(renderOperationPreview(normalized.plan), new RegExp(`lease ${old}`));
+    assert.equal(readFileSync(receiptPath, "utf8"), persistedBeforeRead, "legacy normalization does not rewrite a receipt");
+  });
+
+  const malformed = [
+    {
+      name: "missing-lease",
+      updates: [{ ref: "refs/heads/main", proposed: "tip" }],
+      leases: [],
+    },
+    {
+      name: "duplicate-lease",
+      updates: [{ ref: "refs/heads/main", proposed: "tip" }],
+      leases: [
+        { ref: "refs/heads/main", expected: "old" },
+        { ref: "refs/heads/main", expected: "old" },
+      ],
+    },
+    {
+      name: "mismatched-lease",
+      updates: [{ ref: "refs/heads/main", proposed: "tip" }],
+      leases: [{ ref: "refs/heads/topic", expected: "old" }],
+    },
+  ];
+  for (const candidate of malformed) {
+    await withRepository(`wipstream-operation-invalid-${candidate.name}-`, async (_directory, repo) => {
+      const current = createOperationPlan({
+        operationId: `invalid-${candidate.name}`,
+        command: "Invalid Legacy Plan",
+      });
+      await beginOperation(repo, {
+        ...current,
+        schemaVersion: 1,
+        remoteRefUpdates: candidate.updates,
+        remoteLeases: candidate.leases,
+      });
+      await expectOperationError(
+        () => readOperationReceipt(repo, current.operationId),
+        "INVALID_OPERATION_RECEIPT"
+      );
+    });
+  }
 }
 
 async function runExpectedOldTransactionContract() {
@@ -281,6 +349,7 @@ async function runBoundaryJournalContract() {
 
 Promise.resolve()
   .then(runPlanAndPreviewContract)
+  .then(runLegacyRemoteLeaseCompatibility)
   .then(runExpectedOldTransactionContract)
   .then(runInterruptionContract)
   .then(runRetentionContract)

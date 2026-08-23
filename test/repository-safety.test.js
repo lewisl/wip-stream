@@ -6,11 +6,21 @@ const os = require("os");
 const path = require("path");
 
 const { GitRepository, GitWorktreeError, parseWorktreePorcelain } = require("../out/git");
-const { commitAndSave, getFromRemote, initializeRepository } = require("../out/generalized-workflow");
+const { WipStreamError } = require("../out/errors");
+const {
+  GeneralizedWorkflowError,
+  commitAndSave,
+  getFromRemote,
+  initializeRepository,
+} = require("../out/generalized-workflow");
+const { ConflictWorkflowError, reconcileWithRemote } = require("../out/conflict-workflow");
+const { LifecycleWorkflowError, condenseBranch } = require("../out/lifecycle-workflow");
+const { beginOperation, createOperationPlan } = require("../out/operations");
 const {
   CommandLockError,
   acquireRepositoryCommandLock,
   commandLockPath,
+  requireRepositoryPreflight,
 } = require("../out/repository-safety");
 
 const projectRoot = path.resolve(__dirname, "..");
@@ -216,6 +226,112 @@ function runNoWorktreeMutationContract() {
   assert.deepEqual([...new Set(invocations.map(({ source }) => source))], ["src/git.ts"]);
 }
 
+async function runRepositoryPreflightPolicy() {
+  const commonDirectory = mkdtempSync(path.join(os.tmpdir(), "wipstream-preflight-policy-"));
+  const policy = { command: "Policy Test", cleanWorktree: true, cleanSubmodules: true };
+  const repository = (overrides = {}) => ({
+    assertSingleWorktree: async () => {},
+    isBare: async () => false,
+    isShallow: async () => false,
+    operationInProgress: async () => false,
+    hasConflicts: async () => false,
+    statusPorcelain: async () => "",
+    hasDirtySubmodules: async () => false,
+    commonGitDirectory: async () => commonDirectory,
+    ...overrides,
+  });
+  const cases = [
+    ["ADDITIONAL_WORKTREES", { assertSingleWorktree: async () => { throw new WipStreamError("ADDITIONAL_WORKTREES", "extra"); } }],
+    ["BARE_REPOSITORY", { isBare: async () => true }],
+    ["SHALLOW_REPOSITORY", { isShallow: async () => true }],
+    ["GIT_OPERATION_IN_PROGRESS", { operationInProgress: async () => true }],
+    ["UNRESOLVED_CONFLICTS", { hasConflicts: async () => true }],
+    ["DIRTY_WORKTREE", { statusPorcelain: async () => " M file.txt" }],
+    ["DIRTY_SUBMODULES", { hasDirtySubmodules: async () => true }],
+  ];
+  try {
+    for (const [code, overrides] of cases) {
+      await assert.rejects(
+        () => requireRepositoryPreflight(repository(overrides), policy),
+        (error) => error instanceof WipStreamError && error.code === code,
+        code
+      );
+    }
+    await requireRepositoryPreflight(repository({
+      statusPorcelain: async () => " M permitted.txt",
+      hasDirtySubmodules: async () => true,
+    }), { command: "Permissive Test", cleanWorktree: false, cleanSubmodules: false });
+    await requireRepositoryPreflight(repository({
+      statusPorcelain: async () => " M permitted.txt",
+    }), { command: "Submodule-only Policy", cleanWorktree: false, cleanSubmodules: true });
+    await requireRepositoryPreflight(repository({
+      hasDirtySubmodules: async () => true,
+    }), { command: "Worktree-only Policy", cleanWorktree: true, cleanSubmodules: false });
+
+    const calls = [];
+    await requireRepositoryPreflight(repository({
+      assertSingleWorktree: async () => calls.push("worktree"),
+      isBare: async () => { calls.push("bare"); return false; },
+      isShallow: async () => { calls.push("shallow"); return false; },
+      operationInProgress: async () => { calls.push("operation"); return false; },
+      hasConflicts: async () => { calls.push("conflicts"); return false; },
+      statusPorcelain: async () => { calls.push("clean-worktree"); return ""; },
+      hasDirtySubmodules: async () => { calls.push("clean-submodules"); return false; },
+      commonGitDirectory: async () => { calls.push("incomplete-operation"); return commonDirectory; },
+    }), policy);
+    assert.deepEqual(calls, [
+      "worktree",
+      "bare",
+      "shallow",
+      "operation",
+      "conflicts",
+      "clean-worktree",
+      "clean-submodules",
+      "incomplete-operation",
+    ]);
+
+    const incompleteRepository = repository();
+    await beginOperation(incompleteRepository, createOperationPlan({
+      operationId: "preflight-incomplete",
+      command: "Interrupted Test",
+    }));
+    await assert.rejects(
+      () => requireRepositoryPreflight(incompleteRepository, policy),
+      (error) => error instanceof WipStreamError && error.code === "INCOMPLETE_WIPSTREAM_OPERATION"
+    );
+  } finally {
+    rmSync(commonDirectory, { recursive: true, force: true });
+  }
+}
+
+async function runWorkflowPreflightCodes() {
+  await withFixture("wipstream-safety-workflows-", async (fixture) => {
+    const clone = await cloneRepository(fixture, "clone");
+    await initializeRepository(clone.repo);
+    const dirtyPath = path.join(clone.directory, "dirty.txt");
+    writeFileSync(dirtyPath, "uncommitted\n");
+
+    const getError = await expectSafetyError(
+      () => getFromRemote(clone.repo),
+      GeneralizedWorkflowError,
+      "DIRTY_WORKTREE"
+    );
+    assert.match(getError.message, /Get from Remote/);
+    const lifecycleError = await expectSafetyError(
+      () => condenseBranch(clone.repo, {}),
+      LifecycleWorkflowError,
+      "DIRTY_WORKTREE"
+    );
+    assert.match(lifecycleError.message, /Condense Branch/);
+    const reconcileError = await expectSafetyError(
+      () => reconcileWithRemote(clone.repo),
+      ConflictWorkflowError,
+      "DIRTY_WORKTREE"
+    );
+    assert.match(reconcileError.message, /Reconcile with Remote/);
+  });
+}
+
 Promise.resolve()
   .then(runParserCharacterization)
   .then(runLinkedWorktreeRefusals)
@@ -223,6 +339,8 @@ Promise.resolve()
   .then(runCommandLockRefusals)
   .then(runSeparateCloneLocks)
   .then(runNoWorktreeMutationContract)
+  .then(runRepositoryPreflightPolicy)
+  .then(runWorkflowPreflightCodes)
   .then(() => console.log("WipStream repository safety tests passed."))
   .catch((error) => {
     console.error(error.stack || error);

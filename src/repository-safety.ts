@@ -2,7 +2,49 @@ import { randomUUID } from "crypto";
 import { open, mkdir, readFile, unlink } from "fs/promises";
 import { hostname } from "os";
 import * as path from "path";
+import { fail as failWipStream, WipStreamError } from "./errors";
 import { GitRepository } from "./git";
+import { inspectIncompleteOperations } from "./operations";
+
+export interface RepositoryPreflightPolicy {
+  readonly command: string;
+  readonly cleanWorktree: boolean;
+  readonly cleanSubmodules: boolean;
+  readonly refuse?: (code: string, message: string) => never;
+}
+
+export async function requireRepositoryPreflight(
+  repo: GitRepository,
+  policy: RepositoryPreflightPolicy
+): Promise<void> {
+  const { command, cleanWorktree, cleanSubmodules, refuse = failWipStream } = policy;
+  await repo.assertSingleWorktree();
+  if (await repo.isBare()) {
+    refuse("BARE_REPOSITORY", `${command} requires a normal working repository.`);
+  }
+  if (await repo.isShallow()) {
+    refuse("SHALLOW_REPOSITORY", `${command} requires complete repository history.`);
+  }
+  if (await repo.operationInProgress()) {
+    refuse("GIT_OPERATION_IN_PROGRESS", `Finish the active Git operation before ${command}.`);
+  }
+  if (await repo.hasConflicts()) {
+    refuse("UNRESOLVED_CONFLICTS", `Resolve Git conflicts before ${command}.`);
+  }
+  if (cleanWorktree && (await repo.statusPorcelain()).trim()) {
+    refuse("DIRTY_WORKTREE", `${command} requires a clean working tree.`);
+  }
+  if (cleanSubmodules && await repo.hasDirtySubmodules()) {
+    refuse("DIRTY_SUBMODULES", `Commit or discard changes inside submodules before ${command}.`);
+  }
+  const incomplete = await inspectIncompleteOperations(repo);
+  if (incomplete.length) {
+    refuse(
+      "INCOMPLETE_WIPSTREAM_OPERATION",
+      `Inspect the incomplete WipStream operation “${incomplete[0].plan.operationId}” before ${command}.`
+    );
+  }
+}
 
 export interface CommandLockRecord {
   readonly schemaVersion: 1;
@@ -14,8 +56,7 @@ export interface CommandLockRecord {
   readonly repositoryRoot: string;
 }
 
-export class CommandLockError extends Error {
-  public readonly code: "COMMAND_IN_PROGRESS" | "STALE_COMMAND_LOCK" | "COMMAND_LOCK_CHANGED";
+export class CommandLockError extends WipStreamError {
   public readonly lockPath: string;
   public readonly existing?: Partial<CommandLockRecord>;
 
@@ -25,9 +66,8 @@ export class CommandLockError extends Error {
     lockPath: string,
     existing?: Partial<CommandLockRecord>
   ) {
-    super(message);
+    super(code, message);
     this.name = "CommandLockError";
-    this.code = code;
     this.lockPath = lockPath;
     this.existing = existing;
   }

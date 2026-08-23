@@ -1,4 +1,5 @@
 import { GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
+import { fail, WipStreamError } from "./errors";
 import { readRepositoryConfiguration } from "./repository-model";
 import { withRepositoryCommandLock } from "./repository-safety";
 import {
@@ -23,15 +24,7 @@ const UNDOABLE = new Set([
   "Update from Parent",
 ]);
 
-export class UndoWorkflowError extends Error {
-  public readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "UndoWorkflowError";
-    this.code = code;
-  }
-}
+export { WipStreamError as UndoWorkflowError };
 
 export interface UndoEligibility {
   readonly eligible: boolean;
@@ -50,10 +43,6 @@ export interface UndoResult {
   readonly command: string;
   readonly restoredCheckout?: string;
   readonly restoredCheckpoint: boolean;
-}
-
-function fail(code: string, message: string): never {
-  throw new UndoWorkflowError(code, message);
 }
 
 function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
@@ -147,7 +136,7 @@ async function undoLastActionUnlocked(repo: GitRepository, hooks: UndoHooks): Pr
   ) as OperationReceipt;
   const configuration = await readRepositoryConfiguration(repo);
   const remote = configuration.kind === "uninitialized" ? "origin" : configuration.remote;
-  await repo.ensureRemote(remote);
+  await repo.requireConfiguredRemote(remote);
   await repo.fetchAllBranches(remote);
   const completedRemoteRefs = receipt.outcome?.completedRemoteRefs?.filter(
     (entry) => entry.ref.startsWith(`refs/remotes/${remote}/`)
@@ -160,13 +149,11 @@ async function undoLastActionUnlocked(repo: GitRepository, hooks: UndoHooks): Pr
   )) return fail("REMOTE_CHANGED_AFTER_OPERATION", "An ordinary remote branch changed after the operation.");
 
   const reverseRemote: GitRemoteRefUpdate[] = receipt.plan.remoteRefUpdates.map((update) => {
-    const before = receipt.plan.remoteLeases.find((lease) => lease.ref === update.ref)?.expected;
-    if (before === undefined) return fail("UNDO_LEASE_MISSING", `Operation has no original lease for ${update.ref}.`);
-    return { ref: update.ref, expected: update.proposed, proposed: before };
+    return { ref: update.ref, expected: update.proposed, proposed: update.expected };
   });
   for (const update of reverseRemote) {
     const branch = update.ref.replace(/^refs\/heads\//, "");
-    if (await refValue(repo, repo.remoteRef(remote, branch)) !== update.expected) {
+    if (await refValue(repo, repo.remoteTrackingRef(remote, branch)) !== update.expected) {
       return fail("REMOTE_CHANGED_AFTER_OPERATION", `Remote ref ${update.ref} changed after the operation.`);
     }
   }
@@ -179,8 +166,7 @@ async function undoLastActionUnlocked(repo: GitRepository, hooks: UndoHooks): Pr
   const undoPlan = createOperationPlan({
     command: `Undo ${receipt.plan.command}`,
     localRefUpdates: reverseLocal,
-    remoteRefUpdates: reverseRemote.map((update) => ({ ref: update.ref, proposed: update.proposed })),
-    remoteLeases: reverseRemote.map((update) => ({ ref: update.ref, expected: update.expected })),
+    remoteRefUpdates: reverseRemote,
     configurationChanges: reverseConfiguration.map((change) => ({
       key: change.key, before: change.after, after: change.before,
     })),

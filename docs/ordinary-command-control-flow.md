@@ -24,15 +24,15 @@ activate(context): void
        -> register wipstream.init, wipstream.resume, and wipstream.saveup
 ```
 
-Each registered handler returns `runCommand(...)`, a `Promise<void>`. `runCommand` appends a `START` line, runs the handler inside a non-cancellable VS Code progress notification, catches errors for `showError()`, and always calls `refreshCommandContexts()` in `finally`.
+Each registered handler returns `runCommand(...)`, a `Promise<void>`. `runCommand` appends a `START` line, runs the handler inside a VS Code progress notification, catches errors for `showError()`, and always calls `refreshCommandContexts()` in `finally`. Commands that can fetch or push make that notification cancellable and bridge the progress token to a repository network signal. Start Branch and Abort Pending Merge remain non-cancellable because they perform only local mutations.
 
 The common adapter path is:
 
 ```text
 VS Code command handler(): Promise<void>
-  -> runCommand(output, title, action): Promise<void>
-       -> action(): Promise<void>
-            -> selectRepository(): Promise<GitRepository>
+  -> runCommand(output, title, cancellable, action): Promise<void>
+       -> action(networkSignal): Promise<void>
+            -> selectRepository(networkSignal): Promise<GitRepository>
             -> command-specific adapter and workflow calls
        <- action resolves with void, or throws
        -> showError(error): Promise<void>                 [only when action throws]
@@ -40,13 +40,13 @@ VS Code command handler(): Promise<void>
   <- Promise<void>
 ```
 
-`selectRepository()` discovers repositories from the active file and workspace folders. It returns the only `GitRepository`, prompts and returns the selected one when several exist, or throws a `CommandUiError` when none exists or selection is cancelled.
+`selectRepository()` discovers repositories from the active file and workspace folders. It returns the only `GitRepository`, prompts and returns the selected one when several exist, or throws a `WipStreamError` when none exists or selection is cancelled. When supplied, the signal is attached only to that repository instance's fetch and push subprocesses.
 
 Each workflow entry point wraps its unlocked implementation in `withRepositoryCommandLock()`. The lock helper returns the unlocked implementation's result unchanged and releases the repository-local lock in `finally`, including when the workflow throws.
 
 ### Error versus result
 
-`fail()` in the generalized workflow throws a `GeneralizedWorkflowError`; it does not return an error value. Git and UI failures also throw. These errors rise through the command action to `runCommand()`, which reports them and then refreshes command visibility.
+The common `fail()` helper throws a `WipStreamError`; it does not return an error value. Workflow-specific exported error names remain compatibility aliases, while specialized errors retain extra structured fields only when callers use them. Git and UI failures also throw. These errors rise through the command action to `runCommand()`, which reports them and then refreshes command visibility.
 
 Commit and Save has an additional non-exception path. Once it has made or retained a safe local checkpoint, several expected synchronization failures are converted to a `CommitAndSaveResult` with `published: false` and `handoff: "do-not-resume"`. `reportSave()` renders that result as a warning instead of an error. This distinction is detailed in the Commit and Save section.
 
@@ -83,8 +83,8 @@ Initialize Repository and Commit and Save both finish through `applyBidirectiona
 
 The sequence is:
 
-1. Convert the inventory into exact local ref updates and exact-leased remote ref updates. Calculate the branch-name arrays returned as `published`, `created`, `fastForwarded`, and `deleted`.
-2. `createOperationPlan()` returns an immutable `OperationPlan` containing the command, expected and proposed refs, leases, checkout transition, configuration changes, optional checkpoint, and destructive effects.
+1. `buildReconciliationPlan()` converts the inventory into exact local ref updates and unified remote transitions shaped as `{ ref, expected, proposed }`. It also calculates the branch-name arrays returned as `published`, `created`, `fastForwarded`, and `deleted`.
+2. `createOperationPlan()` returns an immutable schema-2 `OperationPlan` containing the command, local and remote transitions, checkout transition, configuration changes, optional checkpoint, and destructive effects. There is no parallel remote-lease array; schema-1 plans are validated and normalized when their receipts are read.
 3. `beginOperation()` writes and returns a planned `OperationReceipt`. From this point onward, a stopped operation can be discovered by `inspectIncompleteOperations()`.
 4. Verify that remote-tracking refs, the checkout, local branch tips, and the worktree still match the state that was classified. A mismatch throws and leaves the receipt incomplete for inspection.
 5. For Commit and Save with a new checkpoint, create a recovery ref for the pre-checkpoint tip inside a journaled `local-refs` mutation boundary.
@@ -124,9 +124,9 @@ An uninitialized repository gets a trimmed remote string from the user. For an a
 
 `initializeRepository()` acquires the `Initialize Repository` command lock and returns `initializeRepositoryUnlocked()`'s result.
 
-1. `requireStableInitializeRepository()` returns `void` after proving exactly one worktree, a non-bare and non-shallow repository, no active Git operation, no conflicts, a clean worktree, and no incomplete WipStream operation. Any failed check throws.
-2. `readRepositoryConfiguration()` returns the configured-state union. The requested remote is validated against it, `ensureRemote()` proves that the remote exists, and `currentBranch()` must return a branch name rather than `null`.
-3. `snapshotRemoteTips()` returns the pre-fetch `ReadonlyMap<branch, objectId>`. The workflow performs an initial inventory inspection, calls `fetchAllBranches()` (`git fetch --prune` with the full branch refspec) and receives `void`, then obtains the remote default branch, post-fetch tip map, and classified inventory.
+1. `requireRepositoryPreflight()` returns `void` after proving exactly one worktree, a non-bare and non-shallow repository, no active Git operation, no conflicts, a clean worktree, and no incomplete WipStream operation. Any failed check throws with an Initialize-specific message.
+2. `readRepositoryConfiguration()` returns the configured-state union. The requested remote is validated against it, `requireConfiguredRemote()` proves that the remote exists, and `currentBranch()` must return a branch name rather than `null`.
+3. `snapshotRemoteTrackingTips()` returns the pre-fetch `ReadonlyMap<branch, objectId>`. The workflow calls `fetchAllBranches()` (`git fetch --prune` with the full branch refspec) and receives `void`, then obtains the remote default branch, post-fetch tip map, and classified inventory. Classification occurs once, after fetch; the pre-fetch snapshot still distinguishes remote deletion.
 4. `initializeUnsafeBranches()` returns unsafe divergent or ambiguous-deletion entries. A non-empty array causes a throw after remote-tracking refs have been refreshed but before any ordinary local branch, remote branch, checkout, or WipStream configuration change.
 5. The fetched default-branch tip must exist. `verifyAtomicPushSupport()` performs an exact-leased atomic dry-run no-op update and returns `void` or throws.
 6. Build configuration transitions for the full fetch refspec, tracking configuration for every synchronized branch, and `wipstream.remote`. The latter is the initialized marker and is not written yet.
@@ -155,9 +155,9 @@ The adapter does not save documents. `assertNoDirtyDocuments()` throws when a fi
 
 `getFromRemote()` acquires the `Get from Remote` command lock and returns `getFromRemoteUnlocked()`'s result.
 
-1. `requireStableGetRepository()` returns `void` after the same structural checks as Initialize: one worktree, non-bare, non-shallow, no active Git operation, no conflicts, a clean worktree, and no incomplete WipStream operation.
+1. `requireRepositoryPreflight()` returns `void` after the same structural checks as Initialize: one worktree, non-bare, non-shallow, no active Git operation, no conflicts, a clean worktree, and no incomplete WipStream operation.
 2. `readRepositoryConfiguration()` must return `{ kind: "initialized", remote }`. The workflow proves the remote exists and requires `currentBranch()` to return a branch name.
-3. Snapshot pre-fetch remote tips, inspect once, fetch and prune all branches, resolve the remote default, snapshot fetched tips, and return the classified inventory.
+3. Snapshot pre-fetch remote-tracking tips, fetch and prune all branches, resolve the remote default, snapshot fetched tips, and return the classified inventory. The meaningful inventory inspection occurs after fetch.
 4. `unsafeBranches()` rejects divergence, local-only branches, unpublished local advances, and ambiguous remote deletion. A rejection may leave updated remote-tracking refs, but it occurs before a plan or ordinary local mutation.
 5. `localUpdates()` returns exact expected-old updates for remote-only creation, remote-ahead fast-forward, and proved remote deletion. `checkoutAfterGet()` returns the current branch unless it will be deleted; in that case it returns a surviving recorded parent, then the remote default as fallback, or throws if neither survives.
 6. `createOperationPlan()` returns a plan with local ref and checkout transitions but no remote updates, and `beginOperation()` returns its planned receipt. A plan is recorded even when there are no ref updates.
@@ -202,7 +202,7 @@ The document-saving and checkpoint-message calls happen inside the locked workfl
 `commitAndSave()` acquires the `Commit and Save` command lock and returns `commitAndSaveUnlocked()`'s result.
 
 1. Call `hooks.saveDocuments()` and receive `void` after all dirty file-backed repository documents have been saved.
-2. `requireStableSaveRepository()` proves one worktree, non-bare, non-shallow, no active Git operation, no conflicts, no dirty submodules, and no incomplete WipStream operation. It intentionally permits ordinary working-tree changes because they are the content to save.
+2. `requireRepositoryPreflight()` proves one worktree, non-bare, non-shallow, no active Git operation, no conflicts, no dirty submodules, and no incomplete WipStream operation. Its Commit and Save policy intentionally permits ordinary working-tree changes because they are the content to save.
 3. Require initialized configuration, an existing selected remote, and a current ordinary branch.
 4. Read the current branch tip, call `stageAll()` (`git add --all`) and receive `void`, then call `hasStagedChanges()` and receive a boolean.
 5. If content is staged, request and validate a message, call `commit()` and receive `void`, then record the before tip, after tip, branch, and message as a `CheckpointTransition`. Git commit hooks run normally. If no content is staged, no message is requested and `checkpointCreated` is `false`.
@@ -210,18 +210,21 @@ The document-saving and checkpoint-message calls happen inside the locked workfl
 
 ### Synchronization sequence
 
-1. Snapshot pre-fetch remote tips and inspect the inventory. Fetch all branches.
+1. Snapshot pre-fetch remote-tracking tips and fetch all branches. The workflow does not construct a discarded pre-fetch inventory.
 2. A Git fetch failure classified as offline or remote-unavailable returns an unsuccessful result immediately; the local checkpoint remains. Other error types still throw.
 3. Resolve the remote default, snapshot fetched tips, and classify the inventory. Divergence or an ambiguous remote deletion returns an unsuccessful `unsafe-branches` result. If the checked-out branch diverged, that result also returns `reconcileBranch` so the UI can offer Reconcile with Remote.
 4. Calculate the target checkout and tracking-configuration transitions, then call the shared `applyBidirectionalReconciliation()` with the optional checkpoint.
 5. If reconciliation succeeds, inspect parent advisories and return a successful `CommitAndSaveResult`.
 6. If reconciliation throws after its receipt was created, inspect the incomplete receipt created by this command and convert the error to an unsuccessful result. Preflight ensures that no older incomplete receipt exists:
-   - a network error becomes `failure: "offline"`;
+   - a cancelled network command becomes `failure: "incomplete"` because the receipt must be inspected;
+   - another network error becomes `failure: "offline"`;
    - an exact-lease rejection at `before-remote-push` becomes `failure: "remote-changed"`;
    - another push rejection at that phase becomes `failure: "remote-unavailable"`;
    - a stop at any other recorded phase becomes `failure: "incomplete"`.
 
 If no incomplete receipt exists, the error is rethrown instead of being guessed into a result.
+
+Cancellation before reconciliation creates its receipt returns `failure: "cancelled"`; any local checkpoint remains safe and the user is told not to resume from another clone. After `beginOperation()`, cancellation leaves the receipt incomplete, so inspection and the existing do-not-resume behavior take precedence. Initialize, Get, and other network-capable commands follow the same receipt boundary when a cancellation is thrown to the command adapter. Local ref, checkout, configuration, and commit mutations do not consume the cancellation signal.
 
 ### Returned result
 
@@ -239,6 +242,7 @@ If no incomplete receipt exists, the error is rethrown instead of being guessed 
   deleted: readonly string[];
   advisories: readonly ParentAdvisory[];
   failure?:
+    | "cancelled"
     | "offline"
     | "unsafe-branches"
     | "remote-changed"

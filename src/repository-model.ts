@@ -1,17 +1,10 @@
 import { CONFIG_KEYS } from "./constants";
+import { fail, WipStreamError } from "./errors";
 import { BranchRelation as GitBranchRelation, GitRef, GitRepository } from "./git";
 
 export const INTERNAL_REF_PREFIX = "refs/wipstream/";
 
-export class RepositoryModelError extends Error {
-  public readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "RepositoryModelError";
-    this.code = code;
-  }
-}
+export { WipStreamError as RepositoryModelError };
 
 export interface UninitializedRepositoryConfiguration {
   readonly kind: "uninitialized";
@@ -54,10 +47,6 @@ export interface RepositoryInspection {
   readonly configuration: RepositoryConfiguration;
   readonly remoteDefaultBranch: string;
   readonly branches: readonly BranchInventoryEntry[];
-}
-
-function fail(code: string, message: string): never {
-  throw new RepositoryModelError(code, message);
 }
 
 function branchParentKey(branch: string): string {
@@ -108,7 +97,7 @@ function refsByBranch(refs: readonly GitRef[], prefix: string): ReadonlyMap<stri
   return result;
 }
 
-export async function snapshotRemoteTips(repo: GitRepository, remote: string): Promise<ReadonlyMap<string, string>> {
+export async function snapshotRemoteTrackingTips(repo: GitRepository, remote: string): Promise<ReadonlyMap<string, string>> {
   const prefix = `refs/remotes/${remote}/`;
   const refs = refsByBranch(await repo.listRefs(prefix), prefix);
   return new Map([...refs].map(([branch, ref]) => [branch, ref.objectId]));
@@ -198,7 +187,7 @@ export async function inspectBranchInventory(
   return result;
 }
 
-export async function resolveRemoteDefaultBranch(repo: GitRepository, remote: string): Promise<string> {
+export async function resolveRemoteTrackingDefaultBranch(repo: GitRepository, remote: string): Promise<string> {
   const symbolicHead = `refs/remotes/${remote}/HEAD`;
   const target = await repo.symbolicRef(symbolicHead);
   if (!target) {
@@ -229,7 +218,7 @@ export async function inspectRepository(
   }
   return {
     configuration,
-    remoteDefaultBranch: await resolveRemoteDefaultBranch(repo, configuration.remote),
+    remoteDefaultBranch: await resolveRemoteTrackingDefaultBranch(repo, configuration.remote),
     branches: await inspectBranchInventory(repo, configuration.remote, previousRemoteTips),
   };
 }

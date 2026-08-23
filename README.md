@@ -66,6 +66,12 @@ remote. An unsuccessful handoff retains the local checkpoint and explicitly
 warns not to resume from another clone. Git commit hooks are honored, and dirty
 submodules are refused.
 
+Commands that may contact the remote show a cancellable progress notification.
+Cancellation stops only the active fetch or push; it never interrupts a local
+commit, checkout, configuration change, or ref transaction. If journaling has
+already begun, WipStream keeps the operation receipt incomplete and requires it
+to be inspected before another mutation. There is no fixed network timeout.
+
 ## A multi-computer session
 
 1. On computer A, run **Get from Remote**, edit, then run **Commit and Save**.
@@ -169,7 +175,7 @@ code --install-extension /path/to/lewisl.wipstream-<version>.vsix
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.2.2.vsix --force
+code --install-extension dist/lewisl.wipstream-0.2.4.vsix --force
 ```
 
 `npm test` uses disposable local bare remotes and clones; it never contacts a

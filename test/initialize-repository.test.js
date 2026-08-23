@@ -171,9 +171,9 @@ async function runBidirectionalInitialization() {
     await assertInitializedParity(fixture, clone);
 
     const receipt = await readOperationReceipt(clone.repo, result.operationId);
-    assert.deepEqual(receipt.plan.remoteLeases, [
-      { ref: "refs/heads/local-advance", expected: expectedRemoteLocalAdvance },
-      { ref: "refs/heads/local-only", expected: null },
+    assert.deepEqual(receipt.plan.remoteRefUpdates, [
+      { ref: "refs/heads/local-advance", expected: expectedRemoteLocalAdvance, proposed: expectedPublishedTip },
+      { ref: "refs/heads/local-only", expected: null, proposed: expectedLocalOnlyTip },
     ]);
     assert.deepEqual(
       receipt.events.map(({ phase }) => phase).filter((phase) => phase.includes("remote-")),

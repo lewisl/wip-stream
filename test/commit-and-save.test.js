@@ -300,6 +300,41 @@ async function runRejectedCommitHook() {
   });
 }
 
+async function runCancelledFetch() {
+  await withFixture("wipstream-save-cancelled-", async (fixture) => {
+    const clone = await cloneRepository(fixture, "clone", true);
+    const controller = new AbortController();
+    controller.abort();
+    const result = await commitAndSave(clone.repo.withNetworkCancellation(controller.signal));
+    assert.equal(result.published, false);
+    assert.equal(result.failure, "cancelled");
+    assert.equal(result.handoff, "do-not-resume");
+    assert.match(result.message, /cancelled/i);
+    assert.equal((await inspectIncompleteOperations(clone.repo)).length, 0);
+  });
+}
+
+async function runCancellationAfterReceipt() {
+  await withFixture("wipstream-save-cancelled-after-receipt-", async (fixture) => {
+    const clone = await cloneRepository(fixture, "clone", true);
+    writeFileSync(path.join(clone.directory, "cancelled-after-push.txt"), "checkpoint\n");
+    const controller = new AbortController();
+    const result = await commitAndSave(clone.repo.withNetworkCancellation(controller.signal), {
+      requestCheckpointMessage: async () => "Checkpoint before cancellation",
+      afterRemotePush: async () => controller.abort(),
+    });
+    assert.equal(result.published, false);
+    assert.equal(result.failure, "incomplete");
+    assert.equal(result.handoff, "do-not-resume");
+    assert.ok(result.operationId);
+    assert.match(result.message, /inspect operation/i);
+    const incomplete = await inspectIncompleteOperations(clone.repo);
+    assert.equal(incomplete.length, 1);
+    assert.equal(incomplete[0].plan.operationId, result.operationId);
+    assert.equal(incomplete[0].phase, "before-remote-fetch");
+  });
+}
+
 Promise.resolve()
   .then(runMultiBranchPublication)
   .then(runUnrelatedRemoteAdvance)
@@ -308,6 +343,8 @@ Promise.resolve()
   .then(runAtomicRemoteRace)
   .then(runDefaultBranchAndDocumentSave)
   .then(runRejectedCommitHook)
+  .then(runCancelledFetch)
+  .then(runCancellationAfterReceipt)
   .then(() => console.log("WipStream generalized Commit and Save tests passed."))
   .catch((error) => {
     console.error(error.stack || error);

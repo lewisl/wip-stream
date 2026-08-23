@@ -1,19 +1,19 @@
 import { GitError, GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
+import { fail, WipStreamError } from "./errors";
 import {
   getBranchParent,
   inspectBranchInventory,
   readRepositoryConfiguration,
-  resolveRemoteDefaultBranch,
+  resolveRemoteTrackingDefaultBranch,
   setBranchParent,
-  snapshotRemoteTips,
+  snapshotRemoteTrackingTips,
 } from "./repository-model";
-import { withRepositoryCommandLock } from "./repository-safety";
+import { requireRepositoryPreflight, withRepositoryCommandLock } from "./repository-safety";
 import {
   applyLocalRefTransaction,
   beginOperation,
   completeOperation,
   createOperationPlan,
-  inspectIncompleteOperations,
   recordPendingMerge,
   recordOperationOutcome,
   recoveryRef,
@@ -26,15 +26,7 @@ import {
   getFromRemote,
 } from "./generalized-workflow";
 
-export class LifecycleWorkflowError extends Error {
-  public readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "LifecycleWorkflowError";
-    this.code = code;
-  }
-}
+export { WipStreamError as LifecycleWorkflowError };
 
 export type ParentSelector = (assumedParent: string) => Promise<string | undefined>;
 export type FinishBranchDisposition = "retain" | "delete";
@@ -90,34 +82,12 @@ export interface CondenseBranchResult {
   readonly exclusiveCommits: number;
 }
 
-function fail(code: string, message: string): never {
-  throw new LifecycleWorkflowError(code, message);
-}
-
-async function requireLifecycleRepository(repo: GitRepository, requireClean: boolean): Promise<string> {
-  await repo.assertSingleWorktree();
-  if (await repo.isBare()) {
-    fail("BARE_REPOSITORY", "WipStream lifecycle commands require a normal working repository.");
-  }
-  if (await repo.isShallow()) {
-    fail("SHALLOW_REPOSITORY", "WipStream lifecycle commands require complete repository history.");
-  }
-  if (await repo.operationInProgress()) {
-    fail("GIT_OPERATION_IN_PROGRESS", "Finish the active Git operation before using a lifecycle command.");
-  }
-  if (await repo.hasConflicts()) {
-    fail("UNRESOLVED_CONFLICTS", "Resolve Git conflicts before using a lifecycle command.");
-  }
-  if (requireClean && (await repo.statusPorcelain()).trim()) {
-    fail("DIRTY_WORKTREE", "This lifecycle command requires a clean working tree.");
-  }
-  const incomplete = await inspectIncompleteOperations(repo);
-  if (incomplete.length) {
-    fail(
-      "INCOMPLETE_WIPSTREAM_OPERATION",
-      `Inspect the incomplete WipStream operation “${incomplete[0].plan.operationId}” first.`
-    );
-  }
+async function requireLifecycleRepository(
+  repo: GitRepository,
+  command: string,
+  cleanWorktree: boolean
+): Promise<string> {
+  await requireRepositoryPreflight(repo, { command, cleanWorktree, cleanSubmodules: false });
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind !== "initialized") {
     fail("NOT_INITIALIZED", "Run Initialize Repository before using lifecycle commands.");
@@ -138,7 +108,7 @@ async function resolveParent(
     }
     return recorded;
   }
-  const assumed = await resolveRemoteDefaultBranch(repo, remote);
+  const assumed = await resolveRemoteTrackingDefaultBranch(repo, remote);
   if (!selectParent) {
     return fail(
       "PARENT_CONFIRMATION_REQUIRED",
@@ -157,7 +127,7 @@ async function resolveParent(
 }
 
 async function requireFetchedParity(repo: GitRepository, remote: string): Promise<void> {
-  const previous = await snapshotRemoteTips(repo, remote);
+  const previous = await snapshotRemoteTrackingTips(repo, remote);
   await repo.fetchAllBranches(remote);
   const inventory = await inspectBranchInventory(repo, remote, previous);
   const mismatches = inventory.filter((branch) => branch.relation !== "equal");
@@ -170,7 +140,7 @@ async function requireFetchedParity(repo: GitRepository, remote: string): Promis
 }
 
 async function verifyParity(repo: GitRepository, remote: string, command: string): Promise<void> {
-  const tips = await snapshotRemoteTips(repo, remote);
+  const tips = await snapshotRemoteTrackingTips(repo, remote);
   const mismatches = (await inspectBranchInventory(repo, remote, tips))
     .filter((branch) => branch.relation !== "equal");
   if (mismatches.length) {
@@ -186,12 +156,12 @@ export async function startBranch(repo: GitRepository, requestedBranch: string):
 }
 
 async function startBranchUnlocked(repo: GitRepository, requestedBranch: string): Promise<StartBranchResult> {
-  const remote = await requireLifecycleRepository(repo, false);
+  const remote = await requireLifecycleRepository(repo, "Start Branch", false);
   const branch = requestedBranch.trim();
   if (!branch || !(await repo.validateBranchName(branch))) {
     return fail("INVALID_BRANCH", `“${requestedBranch}” is not a valid branch name.`);
   }
-  if ((await repo.branchExists(branch)) || (await repo.refExists(repo.remoteRef(remote, branch)))) {
+  if ((await repo.branchExists(branch)) || (await repo.refExists(repo.remoteTrackingRef(remote, branch)))) {
     return fail("BRANCH_EXISTS", `Branch “${branch}” already exists locally or in the fetched remote state.`);
   }
   const parent = await repo.currentBranch();
@@ -223,7 +193,7 @@ async function updateFromParentUnlocked(
   repo: GitRepository,
   selectParent?: ParentSelector
 ): Promise<UpdateFromParentResult> {
-  const remote = await requireLifecycleRepository(repo, true);
+  const remote = await requireLifecycleRepository(repo, "Update from Parent", true);
   const branch = await repo.currentBranch();
   if (!branch) {
     return fail("DETACHED_HEAD", "Check out the branch to update.");
@@ -294,7 +264,7 @@ async function finishBranchUnlocked(
   options: FinishBranchOptions,
   saved: CommitAndSaveResult
 ): Promise<FinishBranchResult> {
-  const remote = await requireLifecycleRepository(repo, true);
+  const remote = await requireLifecycleRepository(repo, "Finish Branch", true);
   const branch = await repo.currentBranch();
   if (!branch) {
     return fail("DETACHED_HEAD", "Check out the branch to finish.");
@@ -316,13 +286,13 @@ async function finishBranchUnlocked(
   const branchTip = await repo.hash(repo.localRef(branch));
   const remoteUpdates: GitRemoteRefUpdate[] = [{
     ref: repo.localRef(parent),
-    expected: await repo.hash(repo.remoteRef(remote, parent)),
+    expected: await repo.hash(repo.remoteTrackingRef(remote, parent)),
     proposed: branchTip,
   }];
   if (disposition === "delete") {
     remoteUpdates.push({
       ref: repo.localRef(branch),
-      expected: await repo.hash(repo.remoteRef(remote, branch)),
+      expected: await repo.hash(repo.remoteTrackingRef(remote, branch)),
       proposed: null,
     });
   }
@@ -344,8 +314,7 @@ async function finishBranchUnlocked(
   const plan = createOperationPlan({
     command: "Finish Branch",
     localRefUpdates: localUpdates,
-    remoteRefUpdates: remoteUpdates.map((update) => ({ ref: update.ref, proposed: update.proposed })),
-    remoteLeases: remoteUpdates.map((update) => ({ ref: update.ref, expected: update.expected })),
+    remoteRefUpdates: remoteUpdates,
     configurationChanges,
     checkout: { before: branch, after: parent },
     destructiveEffects: [
@@ -383,7 +352,7 @@ async function condenseBranchUnlocked(
   repo: GitRepository,
   options: CondenseBranchOptions
 ): Promise<CondenseBranchResult> {
-  const remote = await requireLifecycleRepository(repo, true);
+  const remote = await requireLifecycleRepository(repo, "Condense Branch", true);
   const branch = await repo.currentBranch();
   if (!branch) {
     return fail("DETACHED_HEAD", "Check out the branch to condense.");
@@ -409,14 +378,13 @@ async function condenseBranchUnlocked(
   const newTip = await repo.createCommitFromTree(repo.localRef(branch), parentTip, message);
   const remoteUpdate: GitRemoteRefUpdate = {
     ref: repo.localRef(branch),
-    expected: await repo.hash(repo.remoteRef(remote, branch)),
+    expected: await repo.hash(repo.remoteTrackingRef(remote, branch)),
     proposed: newTip,
   };
   const plan = createOperationPlan({
     command: "Condense Branch",
     localRefUpdates: [{ ref: repo.localRef(branch), expectedOld: oldTip, proposed: newTip }],
-    remoteRefUpdates: [{ ref: remoteUpdate.ref, proposed: newTip }],
-    remoteLeases: [{ ref: remoteUpdate.ref, expected: remoteUpdate.expected }],
+    remoteRefUpdates: [{ ...remoteUpdate, proposed: newTip }],
     checkout: { before: branch, after: branch },
     destructiveEffects: [
       { kind: "rewrite-remote-ref", ref: remoteUpdate.ref, description: `Replace remote ${branch} checkpoints` },

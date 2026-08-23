@@ -34,7 +34,8 @@ Only the extension and command-adapter layers depend on the VS Code API. The wor
 ### VS Code adapter
 
 - [`src/extension.ts`](../src/extension.ts) is the extension entry point. It activates WipStream and delegates command registration.
-- [`src/commands.ts`](../src/commands.ts) is the user-interface adapter. It registers command IDs, selects the repository, saves editor buffers, gathers confirmations and branch names, formats results for the Output panel, and maintains VS Code context keys that control when optional commands appear. Business rules belong in workflow modules rather than here.
+- [`src/commands.ts`](../src/commands.ts) is the user-interface adapter. It registers command IDs, selects the repository, saves editor buffers, gathers confirmations and branch names, formats results for the Output panel, bridges cancellable progress to network Git subprocesses, and maintains VS Code context keys that control when optional commands appear. Business rules belong in workflow modules rather than here.
+- [`src/errors.ts`](../src/errors.ts) supplies the shared `WipStreamError` and `fail()` foundation. Specialized errors remain only where callers need extra structured data, such as Git process details, an unsafe-branch inventory, or command-lock metadata.
 - [`src/constants.ts`](../src/constants.ts) contains shared Git configuration keys.
 
 ### Workflow modules
@@ -48,10 +49,10 @@ Some workflow modules intentionally compose others. For example, lifecycle actio
 
 ### Repository and transaction infrastructure
 
-- [`src/git.ts`](../src/git.ts) is the low-level Git command facade. It runs the Git executable and provides typed operations for refs, branch relationships, status, commits, checkouts, merges, fetching, exact leased pushes, and multi-ref transactions. It also enforces the single-worktree rule before mutation. This module may inspect `git worktree list`, but WipStream never creates or manages worktrees.
+- [`src/git.ts`](../src/git.ts) is the low-level Git command facade. It runs the Git executable and provides typed operations for refs, branch relationships, status, commits, checkouts, merges, fetching, exact leased pushes, and multi-ref transactions. Subprocess stdin is ignored unless a caller supplies input, and failures retain their exit code or termination signal. A repository-scoped cancellation signal applies only to fetch and push; local mutations are allowed to finish. The facade enforces the single-worktree rule immediately before every mutation. This module may inspect `git worktree list`, but WipStream never creates or manages worktrees.
 - [`src/repository-model.ts`](../src/repository-model.ts) translates raw refs and Git configuration into the model used by workflows. It distinguishes initialized clones by their selected WipStream remote, inventories branch tips before and after fetch, classifies branch relationships and remote changes, resolves the remote's default branch, and reads or records parent intent.
-- [`src/repository-safety.ts`](../src/repository-safety.ts) serializes WipStream commands within a clone. Its repository-local command lock detects another running command and leaves stale locks visible for deliberate inspection after interruption.
-- [`src/operations.ts`](../src/operations.ts) provides operation plans, receipts, mutation-boundary journaling, recovery refs, local ref transactions, previews, and incomplete-operation inspection. Compound workflows describe their intended mutations before applying them. This gives recovery and Undo code a concrete record of what was expected and what actually completed.
+- [`src/repository-safety.ts`](../src/repository-safety.ts) serializes WipStream commands within a clone and provides the shared repository preflight. The preflight checks repository shape, Git-operation state, conflicts, command-specific cleanliness, and incomplete WipStream operations in one fixed order. The repository-local command lock detects another running command and leaves stale locks visible for deliberate inspection after interruption.
+- [`src/operations.ts`](../src/operations.ts) provides operation plans, receipts, mutation-boundary journaling, recovery refs, local ref transactions, previews, and incomplete-operation inspection. Each planned remote transition contains its ref, exact expected value, and proposed value together. New plans use schema 2; legacy schema-1 plans are validated and normalized in memory when read, without rewriting their receipts. This gives recovery and Undo code a concrete record of what was expected and what actually completed.
 
 ## Repository state
 
@@ -75,11 +76,11 @@ The remote is the durable handoff point between computers. **Commit and Save** c
 
 The details vary by command, but mutation-heavy workflows follow the same shape:
 
-1. Acquire the repository command lock and verify that the clone has exactly one worktree.
-2. Check command-specific preconditions, such as a clean or stable working state.
+1. Acquire the repository command lock and run the shared repository preflight, including command-specific worktree and submodule cleanliness policy.
+2. Check workflow-specific state, such as initialization, checkout, branch relationships, pending-merge recovery, or Undo eligibility.
 3. Snapshot remote-tracking tips, fetch all ordinary remote branches, and classify the complete branch inventory.
 4. Refuse before changing ordinary branches, the checkout, or WipStream configuration if the relationships cannot be handled safely. Fetching may already have updated remote-tracking refs; those refs are observations, not user branches.
-5. Construct an immutable operation plan with expected old values, proposed local and remote ref values, checkout and configuration transitions, checkpoint information, and destructive effects.
+5. Construct an immutable operation plan with expected-old local transitions, unified `{ ref, expected, proposed }` remote transitions, checkout and configuration transitions, checkpoint information, and destructive effects.
 6. Write an operation receipt before crossing a mutation boundary.
 7. Push remote changes atomically with exact leases when the command publishes or deletes remote refs. Refetch and verify the result.
 8. Apply related local ref changes with one `git update-ref --stdin` transaction using expected old object IDs. Recovery refs preserve displaced commit tips.
@@ -87,6 +88,8 @@ The details vary by command, but mutation-heavy workflows follow the same shape:
 10. Verify postconditions such as local/remote parity, record the after-state, and complete the receipt.
 
 Expected-old checks and remote leases turn an unnoticed concurrent change into a refusal instead of an overwrite. Receipts remain incomplete when an operation stops inside a recoverable boundary, allowing the extension to offer only the recovery action appropriate to the recorded state.
+
+Commands that may fetch or push expose VS Code cancellation. Cancellation stops only the active network subprocess: before a receipt exists it is an ordinary cancellation, while after journaling starts the incomplete receipt remains authoritative and must be inspected. WipStream does not impose an arbitrary network timeout.
 
 Merge conflicts are a special case because Git must leave the index and working tree available for human editing. WipStream records a pending merge, exposes Continue and Abort, and does not pretend the compound operation is complete until one of those paths is verified.
 
@@ -112,7 +115,7 @@ WipStream intentionally uses a small runtime stack:
 - TypeScript is compiled in strict mode for Node 16 modules with an ES2020 target. `@types/node` and `@types/vscode` supply platform types.
 - `vsce` builds the installable VSIX package.
 
-There is currently no third-party npm library imported by the TypeScript runtime. `@firecrawl/anydoc-wasm` is declared in `package.json` but is not referenced by WipStream source or tests; it is not part of this architecture.
+There is currently no third-party npm runtime dependency.
 
 ## Tests
 
@@ -120,7 +123,7 @@ Tests are plain Node.js scripts. They use Node's assertion, filesystem, process,
 
 The suites mirror the source structure:
 
-- [`test/repository-model.test.js`](../test/repository-model.test.js), [`test/repository-safety.test.js`](../test/repository-safety.test.js), and [`test/operations.test.js`](../test/operations.test.js) cover the common model and safety machinery.
+- [`test/git.test.js`](../test/git.test.js), [`test/repository-model.test.js`](../test/repository-model.test.js), [`test/repository-safety.test.js`](../test/repository-safety.test.js), and [`test/operations.test.js`](../test/operations.test.js) cover Git process behavior and the common model and safety machinery.
 - [`test/get-from-remote.test.js`](../test/get-from-remote.test.js), [`test/initialize-repository.test.js`](../test/initialize-repository.test.js), and [`test/commit-and-save.test.js`](../test/commit-and-save.test.js) cover normal use across branch inventories and clones.
 - [`test/lifecycle-workflow.test.js`](../test/lifecycle-workflow.test.js), [`test/conflict-workflow.test.js`](../test/conflict-workflow.test.js), and [`test/undo-workflow.test.js`](../test/undo-workflow.test.js) cover the optional and recovery paths.
 - [`test/command-surface.test.js`](../test/command-surface.test.js) checks the extension manifest, command IDs, titles, keybindings, context visibility, and registered handlers.
@@ -137,7 +140,7 @@ The established separation is useful when extending WipStream:
 3. Add reusable Git observations or primitives to `git.ts`; keep policy out of that layer.
 4. Extend `repository-model.ts` when a workflow needs a new shared classification of repository state.
 5. Acquire the command lock and perform all safe preflight checks before ordinary mutations.
-6. Represent compound mutations as an operation plan. Use exact old values for local ref transactions and exact leases for remote updates.
+6. Represent compound mutations as an operation plan. Use exact old values for local ref transactions and one unified expected/proposed transition per remote ref.
 7. Record each mutation boundary, preserve recoverable tips, and defer configuration changes until the refs they describe are safely established.
 8. Verify the requested goal as a postcondition rather than treating a successful individual Git command as sufficient.
 9. Add tests for the successful path, safe refusal, interruption or retry where applicable, concurrent remote movement, and any resulting Undo or contextual-command behavior.

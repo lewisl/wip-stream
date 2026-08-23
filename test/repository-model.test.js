@@ -11,9 +11,9 @@ const {
   inspectBranchInventory,
   inspectRepository,
   readRepositoryConfiguration,
-  resolveRemoteDefaultBranch,
+  resolveRemoteTrackingDefaultBranch,
   setBranchParent,
-  snapshotRemoteTips,
+  snapshotRemoteTrackingTips,
   writeRepositoryConfiguration,
 } = require("../out/repository-model");
 
@@ -142,7 +142,7 @@ async function runInventoryClassification() {
     git(first.directory, ["fetch", "backup"]);
     git(first.directory, ["branch", "--track", "other-tracked", "backup/main"]);
 
-    const previousRemoteTips = await snapshotRemoteTips(first.repo, "origin");
+    const previousRemoteTips = await snapshotRemoteTrackingTips(first.repo, "origin");
     const publisher = await cloneRepository(fixture, "publisher");
     git(publisher.directory, ["switch", "--track", "origin/remote-ahead"]);
     commitFile(publisher.directory, "remote-advance.txt", "remote advance\n", "Advance remote branch");
@@ -192,11 +192,11 @@ async function runInventoryClassification() {
 async function runRemoteDefaultFailures() {
   await withFixture("wipstream-model-head-", async (fixture) => {
     const first = await cloneRepository(fixture, "first");
-    assert.equal(await resolveRemoteDefaultBranch(first.repo, "origin"), "main");
+    assert.equal(await resolveRemoteTrackingDefaultBranch(first.repo, "origin"), "main");
     git(first.directory, ["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
-    await expectModelError(() => resolveRemoteDefaultBranch(first.repo, "origin"), "REMOTE_HEAD_MISSING");
+    await expectModelError(() => resolveRemoteTrackingDefaultBranch(first.repo, "origin"), "REMOTE_HEAD_MISSING");
     git(first.directory, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/not-real"]);
-    await expectModelError(() => resolveRemoteDefaultBranch(first.repo, "origin"), "REMOTE_HEAD_AMBIGUOUS");
+    await expectModelError(() => resolveRemoteTrackingDefaultBranch(first.repo, "origin"), "REMOTE_HEAD_AMBIGUOUS");
   });
 }
 

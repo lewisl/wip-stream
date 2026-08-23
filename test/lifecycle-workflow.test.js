@@ -264,7 +264,7 @@ async function runCondense() {
     assert.equal(git(clone.directory, ["log", "-1", "--format=%s"]), "One intentional feature commit");
     assert.equal(git(clone.directory, ["rev-parse", recoveryRef(result.operationId, 0)]), oldTip);
     const receipt = await readOperationReceipt(clone.repo, result.operationId);
-    assert.equal(receipt.plan.remoteLeases[0].expected, oldTip);
+    assert.equal(receipt.plan.remoteRefUpdates[0].expected, oldTip);
     assert.deepEqual(receipt.plan.destructiveEffects.map(({ kind }) => kind), [
       "rewrite-remote-ref",
       "rewrite-local-ref",

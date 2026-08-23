@@ -1,19 +1,21 @@
 import { GitError, GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
 import { CONFIG_KEYS } from "./constants";
+import { WipStreamError } from "./errors";
 import {
   BranchInventoryEntry,
   getBranchParent,
   inspectBranchInventory,
   readRepositoryConfiguration,
-  resolveRemoteDefaultBranch,
-  snapshotRemoteTips,
+  resolveRemoteTrackingDefaultBranch,
+  snapshotRemoteTrackingTips,
 } from "./repository-model";
-import { withRepositoryCommandLock } from "./repository-safety";
+import { requireRepositoryPreflight, withRepositoryCommandLock } from "./repository-safety";
 import {
   applyLocalRefTransaction,
   beginOperation,
   CheckpointTransition,
   ConfigurationTransition,
+  OperationPlan,
   completeOperation,
   createOperationPlan,
   inspectIncompleteOperations,
@@ -61,6 +63,7 @@ export interface InitializeRepositoryResult {
 }
 
 export type CommitAndSaveFailure =
+  | "cancelled"
   | "offline"
   | "unsafe-branches"
   | "remote-changed"
@@ -111,14 +114,21 @@ interface ApplyReconciliationOptions {
   readonly configurationChanges?: readonly ConfigurationTransition[];
 }
 
-export class GeneralizedWorkflowError extends Error {
-  public readonly code: string;
+interface ReconciliationPlan {
+  readonly operationPlan: OperationPlan;
+  readonly classifiedLocalTips: ReadonlyMap<string, string>;
+  readonly publishUpdates: readonly GitRemoteRefUpdate[];
+  readonly expectedRemoteTrackingTips: ReadonlyMap<string, string>;
+  readonly currentRefWillChange: boolean;
+  readonly effects: Omit<AppliedReconciliationResult, "operationId">;
+}
+
+export class GeneralizedWorkflowError extends WipStreamError {
   public readonly unsafeBranches: readonly UnsafeBranch[];
 
   constructor(code: string, message: string, unsafeBranches: readonly UnsafeBranch[] = []) {
-    super(message);
+    super(code, message);
     this.name = "GeneralizedWorkflowError";
-    this.code = code;
     this.unsafeBranches = unsafeBranches;
   }
 }
@@ -136,84 +146,6 @@ function defaultCheckpointMessage(): string {
 function isNetworkFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /(could not resolve host|failed to connect|network is unreachable|no route to host|connection timed out|connection reset|could not read from remote|does not appear to be a git repository)/i.test(message);
-}
-
-async function requireStableGetRepository(repo: GitRepository): Promise<void> {
-  await repo.assertSingleWorktree();
-  if (await repo.isBare()) {
-    fail("BARE_REPOSITORY", "Get from Remote requires a normal working repository.");
-  }
-  if (await repo.isShallow()) {
-    fail("SHALLOW_REPOSITORY", "Get from Remote requires complete repository history.");
-  }
-  if (await repo.operationInProgress()) {
-    fail("GIT_OPERATION_IN_PROGRESS", "Finish the active Git operation before Get from Remote.");
-  }
-  if (await repo.hasConflicts()) {
-    fail("UNRESOLVED_CONFLICTS", "Resolve Git conflicts before Get from Remote.");
-  }
-  if ((await repo.statusPorcelain()).trim()) {
-    fail("DIRTY_WORKTREE", "Get from Remote requires a clean working tree.");
-  }
-  const incomplete = await inspectIncompleteOperations(repo);
-  if (incomplete.length) {
-    fail(
-      "INCOMPLETE_WIPSTREAM_OPERATION",
-      `Inspect the incomplete WipStream operation “${incomplete[0].plan.operationId}” before Get from Remote.`
-    );
-  }
-}
-
-async function requireStableInitializeRepository(repo: GitRepository): Promise<void> {
-  await repo.assertSingleWorktree();
-  if (await repo.isBare()) {
-    fail("BARE_REPOSITORY", "Initialize Repository requires a normal working repository.");
-  }
-  if (await repo.isShallow()) {
-    fail("SHALLOW_REPOSITORY", "Initialize Repository requires complete repository history.");
-  }
-  if (await repo.operationInProgress()) {
-    fail("GIT_OPERATION_IN_PROGRESS", "Finish the active Git operation before Initialize Repository.");
-  }
-  if (await repo.hasConflicts()) {
-    fail("UNRESOLVED_CONFLICTS", "Resolve Git conflicts before Initialize Repository.");
-  }
-  if ((await repo.statusPorcelain()).trim()) {
-    fail("DIRTY_WORKTREE", "Initialize Repository requires a clean working tree.");
-  }
-  const incomplete = await inspectIncompleteOperations(repo);
-  if (incomplete.length) {
-    fail(
-      "INCOMPLETE_WIPSTREAM_OPERATION",
-      `Inspect the incomplete WipStream operation “${incomplete[0].plan.operationId}” before Initialize Repository.`
-    );
-  }
-}
-
-async function requireStableSaveRepository(repo: GitRepository): Promise<void> {
-  await repo.assertSingleWorktree();
-  if (await repo.isBare()) {
-    fail("BARE_REPOSITORY", "Commit and Save requires a normal working repository.");
-  }
-  if (await repo.isShallow()) {
-    fail("SHALLOW_REPOSITORY", "Commit and Save requires complete repository history.");
-  }
-  if (await repo.operationInProgress()) {
-    fail("GIT_OPERATION_IN_PROGRESS", "Finish the active Git operation before Commit and Save.");
-  }
-  if (await repo.hasConflicts()) {
-    fail("UNRESOLVED_CONFLICTS", "Resolve Git conflicts before Commit and Save.");
-  }
-  if (await repo.hasDirtySubmodules()) {
-    fail("DIRTY_SUBMODULES", "Commit or discard changes inside submodules before Commit and Save.");
-  }
-  const incomplete = await inspectIncompleteOperations(repo);
-  if (incomplete.length) {
-    fail(
-      "INCOMPLETE_WIPSTREAM_OPERATION",
-      `Inspect the incomplete WipStream operation “${incomplete[0].plan.operationId}” before Commit and Save.`
-    );
-  }
 }
 
 function unsafeBranches(inventory: readonly BranchInventoryEntry[]): readonly UnsafeBranch[] {
@@ -362,7 +294,7 @@ async function checkoutAfterGet(
 }
 
 async function verifyBranchParity(repo: GitRepository, remote: string, command: string): Promise<void> {
-  const currentRemoteTips = await snapshotRemoteTips(repo, remote);
+  const currentRemoteTips = await snapshotRemoteTrackingTips(repo, remote);
   const inventory = await inspectBranchInventory(repo, remote, currentRemoteTips);
   const mismatches = inventory.filter((branch) => branch.relation !== "equal");
   if (mismatches.length) {
@@ -401,40 +333,23 @@ async function parentAdvisories(
   return result;
 }
 
-async function applyBidirectionalReconciliation(
-  repo: GitRepository,
-  options: ApplyReconciliationOptions
-): Promise<AppliedReconciliationResult> {
-  const {
-    command,
-    remote,
-    currentBranch,
-    targetCheckout,
-    fetchedRemoteTips,
-    inventory,
-    checkpoint,
-    hooks = {},
-    configurationChanges = [],
-  } = options;
-  const classifiedLocalTips = inventoryLocalTips(inventory);
+function buildReconciliationPlan(repo: GitRepository, options: ApplyReconciliationOptions): ReconciliationPlan {
+  const { command, currentBranch, targetCheckout, fetchedRemoteTips, inventory, checkpoint } = options;
   const publishUpdates = remoteUpdates(inventory, repo);
   const updates = localUpdates(inventory, repo);
-  const published = inventory
-    .filter((branch) => branch.relation === "local-ahead" || branch.relation === "local-only")
-    .map((branch) => branch.name);
-  const created = inventory.filter((branch) => branch.relation === "remote-only").map((branch) => branch.name);
-  const fastForwarded = inventory.filter((branch) => branch.relation === "remote-ahead").map((branch) => branch.name);
   const deleted = inventory
     .filter((branch) => branch.relation === "remotely-deleted" && branch.localTip)
     .map((branch) => branch.name);
-  const currentRefWillChange = updates.some((update) => update.ref === repo.localRef(currentBranch));
-  const plan = createOperationPlan({
+  const expectedRemoteTrackingTips = new Map(fetchedRemoteTips);
+  for (const update of publishUpdates) {
+    expectedRemoteTrackingTips.set(update.ref.slice("refs/heads/".length), update.proposed as string);
+  }
+  const operationPlan = createOperationPlan({
     command,
     localRefUpdates: updates,
-    remoteRefUpdates: publishUpdates.map((update) => ({ ref: update.ref, proposed: update.proposed })),
-    remoteLeases: publishUpdates.map((update) => ({ ref: update.ref, expected: update.expected })),
+    remoteRefUpdates: publishUpdates,
     checkpoint,
-    configurationChanges,
+    configurationChanges: options.configurationChanges,
     checkout: { before: currentBranch, after: targetCheckout },
     destructiveEffects: [
       ...deleted.map((branch) => ({
@@ -449,60 +364,115 @@ async function applyBidirectionalReconciliation(
       }] : []),
     ],
   });
-  await beginOperation(repo, plan);
+  return {
+    operationPlan,
+    classifiedLocalTips: inventoryLocalTips(inventory),
+    publishUpdates,
+    expectedRemoteTrackingTips,
+    currentRefWillChange: updates.some((update) => update.ref === repo.localRef(currentBranch)),
+    effects: {
+      checkout: targetCheckout,
+      published: inventory
+        .filter((branch) => branch.relation === "local-ahead" || branch.relation === "local-only")
+        .map((branch) => branch.name),
+      created: inventory.filter((branch) => branch.relation === "remote-only").map((branch) => branch.name),
+      fastForwarded: inventory.filter((branch) => branch.relation === "remote-ahead").map((branch) => branch.name),
+      deleted,
+    },
+  };
+}
 
-  if (!mapsEqual(fetchedRemoteTips, await snapshotRemoteTips(repo, remote))) {
+async function verifyReconciliationInputs(
+  repo: GitRepository,
+  options: ApplyReconciliationOptions,
+  reconciliation: ReconciliationPlan
+): Promise<void> {
+  if (!mapsEqual(options.fetchedRemoteTips, await snapshotRemoteTrackingTips(repo, options.remote))) {
     return fail(
       "REMOTE_TRACKING_CHANGED",
-      `Remote-tracking refs changed after ${command} classified them. Inspect the incomplete operation and retry.`
+      `Remote-tracking refs changed after ${options.command} classified them. Inspect the incomplete operation and retry.`
     );
   }
-  await requireUnchangedInitializeCheckout(repo, currentBranch, classifiedLocalTips);
+  await requireUnchangedInitializeCheckout(repo, options.currentBranch, reconciliation.classifiedLocalTips);
+}
+
+async function verifyPublishedRemoteTrackingTips(
+  repo: GitRepository,
+  options: ApplyReconciliationOptions,
+  reconciliation: ReconciliationPlan
+): Promise<void> {
+  if (!mapsEqual(
+    reconciliation.expectedRemoteTrackingTips,
+    await snapshotRemoteTrackingTips(repo, options.remote)
+  )) {
+    return fail(
+      "REMOTE_CHANGED_DURING_RECONCILIATION",
+      `A remote branch changed while ${options.command} was publishing. The atomic publication succeeded, but local refs remain unchanged; inspect the incomplete operation and retry.`
+    );
+  }
+  await requireUnchangedInitializeCheckout(repo, options.currentBranch, reconciliation.classifiedLocalTips);
+}
+
+async function executeReconciliationPlan(
+  repo: GitRepository,
+  options: ApplyReconciliationOptions,
+  reconciliation: ReconciliationPlan
+): Promise<void> {
+  const { currentBranch, targetCheckout, checkpoint, hooks = {} } = options;
+  const { operationPlan, publishUpdates, currentRefWillChange } = reconciliation;
   if (checkpoint && checkpoint.before !== checkpoint.after) {
-    await withMutationBoundary(repo, plan.operationId, "local-refs", () => repo.updateRefs([{
-      ref: recoveryRef(plan.operationId, updates.length),
+    await withMutationBoundary(repo, operationPlan.operationId, "local-refs", () => repo.updateRefs([{
+      ref: recoveryRef(operationPlan.operationId, operationPlan.localRefUpdates.length),
       expectedOld: null,
       proposed: checkpoint.before,
     }]));
   }
-
   if (publishUpdates.length) {
     await hooks.beforeRemotePush?.();
-    await withMutationBoundary(repo, plan.operationId, "remote-push", () => repo.pushRefsAtomic(remote, publishUpdates));
+    await withMutationBoundary(repo, operationPlan.operationId, "remote-push", () => (
+      repo.pushRefsAtomic(options.remote, publishUpdates)
+    ));
     await hooks.afterRemotePush?.();
-    await withMutationBoundary(repo, plan.operationId, "remote-fetch", () => repo.fetchAllBranches(remote));
-    const expectedRemoteTips = new Map(fetchedRemoteTips);
-    for (const update of publishUpdates) {
-      expectedRemoteTips.set(update.ref.slice("refs/heads/".length), update.proposed as string);
-    }
-    if (!mapsEqual(expectedRemoteTips, await snapshotRemoteTips(repo, remote))) {
-      return fail(
-        "REMOTE_CHANGED_DURING_RECONCILIATION",
-        `A remote branch changed while ${command} was publishing. The atomic publication succeeded, but local refs remain unchanged; inspect the incomplete operation and retry.`
-      );
-    }
-    await requireUnchangedInitializeCheckout(repo, currentBranch, classifiedLocalTips);
+    await withMutationBoundary(repo, operationPlan.operationId, "remote-fetch", () => (
+      repo.fetchAllBranches(options.remote)
+    ));
+    await verifyPublishedRemoteTrackingTips(repo, options, reconciliation);
   }
   if (currentRefWillChange) {
-    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
+    await withMutationBoundary(repo, operationPlan.operationId, "checkout", () => repo.detach());
   }
-  if (updates.length) {
-    await applyLocalRefTransaction(repo, plan);
+  if (operationPlan.localRefUpdates.length) {
+    await applyLocalRefTransaction(repo, operationPlan);
   }
   if (currentRefWillChange || currentBranch !== targetCheckout) {
-    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(targetCheckout));
+    await withMutationBoundary(repo, operationPlan.operationId, "checkout", () => repo.switch(targetCheckout));
   }
+}
 
-  await verifyBranchParity(repo, remote, command);
-  if (configurationChanges.length) {
-    await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
-      for (const change of configurationChanges) {
-        await repo.replaceConfigValues(change.key, change.after);
-      }
-    });
+async function applyReconciliationConfiguration(repo: GitRepository, plan: OperationPlan): Promise<void> {
+  if (!plan.configurationChanges.length) {
+    return;
   }
-  await completeOperation(repo, plan.operationId);
-  return { operationId: plan.operationId, checkout: targetCheckout, published, created, fastForwarded, deleted };
+  await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
+    for (const change of plan.configurationChanges) {
+      await repo.replaceConfigValues(change.key, change.after);
+    }
+  });
+}
+
+async function applyBidirectionalReconciliation(
+  repo: GitRepository,
+  options: ApplyReconciliationOptions
+): Promise<AppliedReconciliationResult> {
+  const reconciliation = buildReconciliationPlan(repo, options);
+  const { operationPlan } = reconciliation;
+  await beginOperation(repo, operationPlan);
+  await verifyReconciliationInputs(repo, options, reconciliation);
+  await executeReconciliationPlan(repo, options, reconciliation);
+  await verifyBranchParity(repo, options.remote, options.command);
+  await applyReconciliationConfiguration(repo, operationPlan);
+  await completeOperation(repo, operationPlan.operationId);
+  return { operationId: operationPlan.operationId, ...reconciliation.effects };
 }
 
 export async function initializeRepository(
@@ -522,7 +492,12 @@ async function initializeRepositoryUnlocked(
   requestedRemote: string | undefined,
   hooks: InitializeRepositoryHooks
 ): Promise<InitializeRepositoryResult> {
-  await requireStableInitializeRepository(repo);
+  await requireRepositoryPreflight(repo, {
+    command: "Initialize Repository",
+    cleanWorktree: true,
+    cleanSubmodules: false,
+    refuse: fail,
+  });
   const configuration = await readRepositoryConfiguration(repo);
   const selectedRemote = requestedRemote?.trim();
   if (requestedRemote !== undefined && !selectedRemote) {
@@ -535,17 +510,16 @@ async function initializeRepositoryUnlocked(
     );
   }
   const remote = configuration.kind === "initialized" ? configuration.remote : selectedRemote ?? "origin";
-  await repo.ensureRemote(remote);
+  await repo.requireConfiguredRemote(remote);
   const currentBranch = await repo.currentBranch();
   if (!currentBranch) {
     return fail("DETACHED_HEAD", "Check out an ordinary branch before Initialize Repository.");
   }
 
-  const previousRemoteTips = await snapshotRemoteTips(repo, remote);
-  await inspectBranchInventory(repo, remote, previousRemoteTips);
+  const previousRemoteTips = await snapshotRemoteTrackingTips(repo, remote);
   await repo.fetchAllBranches(remote);
-  const remoteDefaultBranch = await resolveRemoteDefaultBranch(repo, remote);
-  const fetchedRemoteTips = await snapshotRemoteTips(repo, remote);
+  const remoteDefaultBranch = await resolveRemoteTrackingDefaultBranch(repo, remote);
+  const fetchedRemoteTips = await snapshotRemoteTrackingTips(repo, remote);
   const inventory = await inspectBranchInventory(repo, remote, previousRemoteTips);
   const unsafe = initializeUnsafeBranches(inventory);
   if (unsafe.length) {
@@ -598,12 +572,17 @@ async function commitAndSaveUnlocked(
   hooks: CommitAndSaveHooks
 ): Promise<CommitAndSaveResult> {
   await hooks.saveDocuments?.();
-  await requireStableSaveRepository(repo);
+  await requireRepositoryPreflight(repo, {
+    command: "Commit and Save",
+    cleanWorktree: false,
+    cleanSubmodules: true,
+    refuse: fail,
+  });
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind !== "initialized") {
     return fail("NOT_INITIALIZED", "Run Initialize Repository before using Commit and Save.");
   }
-  await repo.ensureRemote(configuration.remote);
+  await repo.requireConfiguredRemote(configuration.remote);
   const currentBranch = await repo.currentBranch();
   if (!currentBranch) {
     return fail("DETACHED_HEAD", "Check out an ordinary branch before Commit and Save.");
@@ -660,12 +639,17 @@ async function commitAndSaveUnlocked(
     failure,
   });
 
-  const previousRemoteTips = await snapshotRemoteTips(repo, configuration.remote);
-  await inspectBranchInventory(repo, configuration.remote, previousRemoteTips);
+  const previousRemoteTips = await snapshotRemoteTrackingTips(repo, configuration.remote);
   try {
     await repo.fetchAllBranches(configuration.remote);
   } catch (error) {
     if (error instanceof GitError) {
+      if (error.cancelled) {
+        return unsuccessful(
+          "cancelled",
+          "The local checkpoint is safe, but the remote handoff was cancelled."
+        );
+      }
       return unsuccessful(
         isNetworkFailure(error) ? "offline" : "remote-unavailable",
         isNetworkFailure(error)
@@ -675,8 +659,8 @@ async function commitAndSaveUnlocked(
     }
     throw error;
   }
-  const remoteDefaultBranch = await resolveRemoteDefaultBranch(repo, configuration.remote);
-  const fetchedRemoteTips = await snapshotRemoteTips(repo, configuration.remote);
+  const remoteDefaultBranch = await resolveRemoteTrackingDefaultBranch(repo, configuration.remote);
+  const fetchedRemoteTips = await snapshotRemoteTrackingTips(repo, configuration.remote);
   const inventory = await inspectBranchInventory(repo, configuration.remote, previousRemoteTips);
   const unsafe = initializeUnsafeBranches(inventory);
   if (unsafe.length) {
@@ -719,6 +703,13 @@ async function commitAndSaveUnlocked(
       throw error;
     }
     const details = { operationId: incomplete.plan.operationId };
+    if (error instanceof GitError && error.cancelled) {
+      return unsuccessful(
+        "incomplete",
+        `The remote handoff was cancelled at phase “${incomplete.phase}”. Inspect operation “${incomplete.plan.operationId}” before continuing.`,
+        details
+      );
+    }
     if (error instanceof GitError && isNetworkFailure(error)) {
       return unsuccessful(
         "offline",
@@ -746,7 +737,7 @@ async function commitAndSaveUnlocked(
   const currentInventory = await inspectBranchInventory(
     repo,
     configuration.remote,
-    await snapshotRemoteTips(repo, configuration.remote)
+    await snapshotRemoteTrackingTips(repo, configuration.remote)
   );
   const advisories = await parentAdvisories(repo, remoteDefaultBranch, currentInventory);
   return {
@@ -767,22 +758,26 @@ export async function getFromRemote(repo: GitRepository): Promise<GetFromRemoteR
 }
 
 async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemoteResult> {
-  await requireStableGetRepository(repo);
+  await requireRepositoryPreflight(repo, {
+    command: "Get from Remote",
+    cleanWorktree: true,
+    cleanSubmodules: false,
+    refuse: fail,
+  });
   const configuration = await readRepositoryConfiguration(repo);
   if (configuration.kind !== "initialized") {
     return fail("NOT_INITIALIZED", "Run Initialize Repository before using Get from Remote.");
   }
-  await repo.ensureRemote(configuration.remote);
+  await repo.requireConfiguredRemote(configuration.remote);
   const currentBranch = await repo.currentBranch();
   if (!currentBranch) {
     return fail("DETACHED_HEAD", "Check out an ordinary branch before Get from Remote.");
   }
 
-  const previousRemoteTips = await snapshotRemoteTips(repo, configuration.remote);
-  await inspectBranchInventory(repo, configuration.remote, previousRemoteTips);
+  const previousRemoteTips = await snapshotRemoteTrackingTips(repo, configuration.remote);
   await repo.fetchAllBranches(configuration.remote);
-  const remoteDefaultBranch = await resolveRemoteDefaultBranch(repo, configuration.remote);
-  const fetchedRemoteTips = await snapshotRemoteTips(repo, configuration.remote);
+  const remoteDefaultBranch = await resolveRemoteTrackingDefaultBranch(repo, configuration.remote);
+  const fetchedRemoteTips = await snapshotRemoteTrackingTips(repo, configuration.remote);
   const inventory = await inspectBranchInventory(repo, configuration.remote, previousRemoteTips);
   const unsafe = unsafeBranches(inventory);
   if (unsafe.length) {
@@ -821,7 +816,7 @@ async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemote
   });
   await beginOperation(repo, plan);
 
-  if (!mapsEqual(fetchedRemoteTips, await snapshotRemoteTips(repo, configuration.remote))) {
+  if (!mapsEqual(fetchedRemoteTips, await snapshotRemoteTrackingTips(repo, configuration.remote))) {
     return fail(
       "REMOTE_TRACKING_CHANGED",
       "Remote-tracking refs changed after Get from Remote classified them. Inspect the incomplete operation and retry."
@@ -855,7 +850,7 @@ async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemote
   const currentInventory = await inspectBranchInventory(
     repo,
     configuration.remote,
-    await snapshotRemoteTips(repo, configuration.remote)
+    await snapshotRemoteTrackingTips(repo, configuration.remote)
   );
   const advisories = await parentAdvisories(repo, remoteDefaultBranch, currentInventory);
   await completeOperation(repo, plan.operationId);
