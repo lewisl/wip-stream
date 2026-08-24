@@ -175,7 +175,7 @@ code --install-extension /path/to/lewisl.wipstream-<version>.vsix
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.2.4.vsix --force
+code --install-extension dist/lewisl.wipstream-0.2.5.vsix --force
 ```
 
 `npm test` uses disposable local bare remotes and clones; it never contacts a

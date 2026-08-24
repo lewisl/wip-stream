@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.5
+
+- Moved visible VS Code command handlers and registration into a focused source
+  file, replacing deeply nested registration lambdas with named functions.
+- Kept shared command execution, cancellation, reporting, and repository helpers
+  centralized while making command-specific behavior easier to trace and debug.
+- Hardened cancellable Git network execution and removed an unused runtime
+  dependency while expanding process and repository-safety coverage.
+
 ## 0.2.3
 
 - Simplified clone initialization to use the selected `wipstream.remote` as the

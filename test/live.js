@@ -86,7 +86,7 @@ This workspace is disposable. It uses a private bare remote at the parent test d
 
 1. Run **WipStream: Initialize Repository** and accept remote \`origin\`.
 2. Use VS Code's normal **Git: Checkout to...** command to check out \`change/live\`.
-3. Run **WipStream: Get from Remote** before editing. Confirm \`live-work.txt\` has the first-computer line.
+3. Confirm \`live-work.txt\` has the first-computer line. **WipStream: Get from Remote** is optional here because **Git: Checkout to...** may already have fetched and checked out the current remote tip.
 4. Append exactly: \`second computer\`.
 5. Run **WipStream: Commit and Save** and confirm the remote handoff is complete.
 6. At this point an ordinary move between computers is complete: you could close this window, Get from Remote on the first computer, and continue \`change/live\` with both computers' changes intact.

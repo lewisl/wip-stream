@@ -3,7 +3,7 @@
   "displayName": "WipStream",
   "publisher": "lewisl",
   "description": "Use git to synchronize feature development across several computers.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "extensionKind": [
     "workspace"
   ],

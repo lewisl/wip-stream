@@ -4,7 +4,9 @@ const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 const packageJson = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-const commandsSource = readFileSync(path.join(root, "src", "commands.ts"), "utf8");
+const commandHelpersSource = readFileSync(path.join(root, "src", "commands.ts"), "utf8");
+const registeredCommandsSource = readFileSync(path.join(root, "src", "registered-commands.ts"), "utf8");
+const commandsSource = commandHelpersSource + registeredCommandsSource;
 
 const primary = [
   { id: "wipstream.init", title: "Initialize Repository", key: "ctrl+w i" },
@@ -42,11 +44,18 @@ for (const id of removedLegacy) assert.equal(palette.has(id), false, `${id} is a
 
 for (const id of [...primary.map(({ id }) => id), ...contextual.map(([id]) => id)]) {
   assert.ok(packageJson.activationEvents.includes(`onCommand:${id}`), `${id} activates the extension`);
-  assert.ok(commandsSource.includes(`register("${id.replace("wipstream.", "")}"`), `${id} has a registered handler`);
+  assert.ok(
+    registeredCommandsSource.includes(`registerCommand(context, output, "${id.replace("wipstream.", "")}"`),
+    `${id} has a registered handler`
+  );
 }
 for (const id of removedLegacy) {
   assert.equal(packageJson.activationEvents.includes(`onCommand:${id}`), false, `${id} has no activation event`);
-  assert.equal(commandsSource.includes(`register("${id.replace("wipstream.", "")}"`), false, `${id} has no handler`);
+  assert.equal(
+    registeredCommandsSource.includes(`registerCommand(context, output, "${id.replace("wipstream.", "")}"`),
+    false,
+    `${id} has no handler`
+  );
 }
 
 assert.match(commandsSource, /operation=\$\{operationId\}/, "Output records include operation ids");
@@ -54,10 +63,18 @@ assert.doesNotMatch(commandsSource, /confirmMigrationPreview/, "Initialize has n
 assert.match(commandsSource, /inspectPendingMerge/, "pending merge context is inspected");
 assert.match(commandsSource, /inspectUndoEligibility/, "Undo visibility uses exact eligibility");
 for (const command of cancellable) {
-  assert.match(commandsSource, new RegExp(`register\\("${command}", [^\\n]+, true,`), `${command} exposes network cancellation`);
+  assert.match(
+    registeredCommandsSource,
+    new RegExp(`registerCommand\\(context, output, "${command}", [^\\n]+, true,`),
+    `${command} exposes network cancellation`
+  );
 }
 for (const command of localOnly) {
-  assert.match(commandsSource, new RegExp(`register\\("${command}", [^\\n]+, false,`), `${command} remains non-cancellable`);
+  assert.match(
+    registeredCommandsSource,
+    new RegExp(`registerCommand\\(context, output, "${command}", [^\\n]+, false,`),
+    `${command} remains non-cancellable`
+  );
 }
 assert.equal(packageJson.dependencies?.["@firecrawl/anydoc-wasm"], undefined, "unused runtime dependency is absent");
 
