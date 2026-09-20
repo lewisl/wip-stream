@@ -75,15 +75,16 @@ export type MutationBoundary =
   | "checkout"
   | "configuration"
   | "merge";
-export type TerminalOperationPhase = "completed" | "aborted" | "undone";
+export type TerminalOperationPhase = "completed" | "aborted" | "undone" | "recovered";
 export type OperationPhase = "planned" | `before-${MutationBoundary}` | `after-${MutationBoundary}` | TerminalOperationPhase;
-export type OperationStatus = "planned" | "in-progress" | "completed" | "aborted" | "undone";
+export type OperationStatus = "planned" | "in-progress" | TerminalOperationPhase;
 
 export interface PendingMerge {
   readonly kind: "merge";
   readonly command: "Update from Parent" | "Reconcile with Remote";
   readonly branch: string;
   readonly mergeTarget: string;
+  readonly mergeTargetCommit?: string;
   readonly preHead: string;
   readonly preIndexTree: string;
   readonly preStatus: string;
@@ -104,6 +105,12 @@ export interface OperationReceipt {
   readonly pendingMerge?: Readonly<PendingMerge>;
   readonly outcome?: Readonly<OperationOutcome>;
   readonly completedAt?: string;
+  readonly recovery?: {
+    readonly resolution: "merge-completed-externally" | "merge-aborted-externally" | "kept-current-state";
+    readonly branch?: string;
+    readonly head?: string;
+    readonly mergeCommit?: string;
+  };
 }
 
 export { WipStreamError as OperationError };
@@ -314,7 +321,7 @@ function normalizeOperationReceipt(value: unknown): OperationReceipt | undefined
   if (!isObject(value)
     || value.schemaVersion !== 1
     || typeof value.phase !== "string"
-    || !["planned", "in-progress", "completed", "aborted", "undone"].includes(String(value.status))
+    || !["planned", "in-progress", "completed", "aborted", "undone", "recovered"].includes(String(value.status))
     || !Array.isArray(value.events)) {
     return undefined;
   }
@@ -479,6 +486,31 @@ export async function abortOperation(repo: GitRepository, operationId: string): 
     status: "aborted",
     events: [...receipt.events, { phase: "aborted", recordedAt }],
     completedAt: recordedAt,
+  };
+  await writeReceipt(await operationReceiptPath(repo, operationId), updated, false);
+  return updated;
+}
+
+/** Record recovery without making the interrupted attempt eligible for Undo.
+ * The caller holds the repository command lock; no refs or working files move.
+ */
+export async function recordOperationRecovery(
+  repo: GitRepository,
+  operationId: string,
+  recovery: NonNullable<OperationReceipt["recovery"]>
+): Promise<OperationReceipt> {
+  const receipt = await readOperationReceipt(repo, operationId);
+  if (receipt.status !== "planned" && receipt.status !== "in-progress") {
+    return fail("OPERATION_NOT_IN_PROGRESS", `WipStream operation ${operationId} is not incomplete.`);
+  }
+  const recordedAt = new Date().toISOString();
+  const updated: OperationReceipt = {
+    ...receipt,
+    phase: "recovered",
+    status: "recovered",
+    recovery,
+    completedAt: recordedAt,
+    events: [...receipt.events, { phase: "recovered", recordedAt }],
   };
   await writeReceipt(await operationReceiptPath(repo, operationId), updated, false);
   return updated;

@@ -59,7 +59,7 @@ function refSnapshotsEqual(
 
 async function latestTerminalReceipt(repo: GitRepository): Promise<OperationReceipt | undefined> {
   return (await listOperationReceipts(repo))
-    .filter((receipt) => receipt.status === "completed" || receipt.status === "undone")
+    .filter((receipt) => receipt.status === "completed" || receipt.status === "undone" || receipt.status === "recovered")
     .sort((left, right) => String(right.completedAt).localeCompare(String(left.completedAt)))[0];
 }
 
@@ -109,7 +109,7 @@ export async function inspectUndoEligibility(repo: GitRepository): Promise<UndoE
   if ((await inspectIncompleteOperations(repo)).length) return { eligible: false, reason: "An operation is incomplete." };
   const receipt = await latestTerminalReceipt(repo);
   if (!receipt) return { eligible: false, reason: "There is no completed operation." };
-  if (receipt.status === "undone" || !UNDOABLE.has(receipt.plan.command)) {
+  if (receipt.status !== "completed" || !UNDOABLE.has(receipt.plan.command)) {
     return { eligible: false, reason: "The latest operation is not undoable." };
   }
   const reason = await localStateMatches(repo, receipt);

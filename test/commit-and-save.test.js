@@ -7,6 +7,7 @@ const path = require("path");
 const { GitError, GitRepository } = require("../out/git");
 const { commitAndSave, initializeRepository } = require("../out/generalized-workflow");
 const { inspectIncompleteOperations, readOperationReceipt, recoveryRef } = require("../out/operations");
+const { recoverIncompleteOperation } = require("../out/recovery-workflow");
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -250,6 +251,13 @@ async function runAtomicRemoteRace() {
     assert.equal(incomplete.length, 1);
     assert.equal(incomplete[0].plan.operationId, result.operationId);
     assert.equal(incomplete[0].phase, "before-remote-push");
+    const localBefore = heads(clone.directory);
+    const remoteBefore = heads(fixture.remote);
+    await recoverIncompleteOperation(clone.repo, result.operationId);
+    assert.equal(heads(clone.directory), localBefore);
+    assert.equal(heads(fixture.remote), remoteBefore);
+    const retry = await commitAndSave(clone.repo);
+    assert.equal(retry.failure, "unsafe-branches", "retry uses fresh history instead of replaying stale leases");
   });
 }
 

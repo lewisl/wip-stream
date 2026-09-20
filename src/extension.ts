@@ -6,5 +6,5 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-    // WipStream has no background watcher or persistent process.
+    // VS Code disposes the registered Git-state event subscriptions.
 }

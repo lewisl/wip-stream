@@ -5,6 +5,7 @@ import * as path from "path";
 import { fail as failWipStream, WipStreamError } from "./errors";
 import { GitRepository } from "./git";
 import { inspectIncompleteOperations } from "./operations";
+import { recoverExternalMerge } from "./merge-recovery";
 
 export interface RepositoryPreflightPolicy {
   readonly command: string;
@@ -26,7 +27,7 @@ export async function requireRepositoryPreflight(
     refuse("SHALLOW_REPOSITORY", `${command} requires complete repository history.`);
   }
   if (await repo.operationInProgress()) {
-    refuse("GIT_OPERATION_IN_PROGRESS", `Finish the active Git operation before ${command}.`);
+    refuse("GIT_OPERATION_IN_PROGRESS", `Finish or abort the active Git operation before ${command}. For a WipStream merge, use Continue Pending Merge or Abort Pending Merge.`);
   }
   if (await repo.hasConflicts()) {
     refuse("UNRESOLVED_CONFLICTS", `Resolve Git conflicts before ${command}.`);
@@ -38,10 +39,11 @@ export async function requireRepositoryPreflight(
     refuse("DIRTY_SUBMODULES", `Commit or discard changes inside submodules before ${command}.`);
   }
   const incomplete = await inspectIncompleteOperations(repo);
-  if (incomplete.length) {
+  for (const receipt of incomplete) {
+    if (await recoverExternalMerge(repo, receipt)) continue;
     refuse(
       "INCOMPLETE_WIPSTREAM_OPERATION",
-      `Inspect the incomplete WipStream operation “${incomplete[0].plan.operationId}” before ${command}.`
+      `WipStream operation “${receipt.plan.operationId}” (${receipt.plan.command}, ${receipt.phase}) is incomplete. Run WipStream: Recover Incomplete Operation to inspect it and keep your current files and commits, then retry ${command}.`
     );
   }
 }

@@ -1,188 +1,204 @@
 # WipStream
 
-WipStream is a VS Code extension for one person who works on a Git repository
-from more than one computer. It provides goal-oriented commands for safe Git
-handoff without hiding branch state or inventing a parallel revision system.
+WipStream helps one person save work in progress and continue it on another
+computer. Work on a named branch, **Commit and Save** before leaving a computer,
+and **Get from Remote** before editing on the next one.
 
-WipStream is currently distributed as a `.vsix`; it is not published on the
-VS Code Marketplace.
+Use one editing clone at a time. Keep completed work on `main` (or your remote's
+default branch), and develop on work branches. This is a workflow convention;
+WipStream does not prohibit committing directly on `main`.
 
-## The model
+## Set up each computer
 
-WipStream supports every ordinary Git branch. A typical repository might look
-like this:
+1. Install the WipStream `.vsix` using **Extensions: Install from VSIX...** in
+   VS Code. Reload the window if prompted. WipStream is not on the Marketplace.
+2. Open a normal, complete Git clone with a configured remote, usually `origin`.
+3. With a clean working directory, run **WipStream: Initialize Repository** once
+   in each clone. Initialize synchronizes safe branch advances in both directions
+   and checks out the remote default branch.
+4. Use **Start Branch** for new work, or select an existing work branch using
+   VS Code's Git branch picker, Fork, or Git itself.
 
-```text
-main ────────────────●──────────────●
-  ├─ change/search ──●──●
-  └─ change/export ──●────●
-```
+The remote must identify a default branch, support atomic pushes, and allow
+branch creation, updates, and deletion. Separate ordinary clones are supported;
+linked Git worktrees and shallow clones are not.
 
-There are no managed WIP companion branches. The checked-out branch is the
-branch being edited, and **Commit and Save** checkpoints that branch while also
-reconciling every other safe local or remote branch.
+## Start a new task
 
-WipStream assumes one person, several separate clones, and one active editing
-clone at a time. It detects remote changes made by another person or tool, but
-it is not a team workflow, pull-request manager, or deployment system.
+Choose the branch you eventually want the work incorporated into, then run
+**WipStream: Start Branch** and give the task a descriptive name, such as
+`histories-rewrite`.
 
-## Normal use: three commands
-
-### Initialize Repository (`wipstream.init`)
-
-Run this once in each clone. Initialize validates a complete non-bare clone,
-the selected remote and its default branch, full branch fetch coverage, atomic
-push support, a clean working tree, and exactly one worktree. It then safely
-reconciles every ordinary local and remote branch in both directions and checks
-out the remote default branch.
-
-### Get from Remote (`wipstream.resume`)
-
-Run this before editing when returning to a clone. Get fetches and prunes every
-remote branch, then applies all safe local updates as one expected-state
-transaction. It preserves the current checkout unless that branch was safely
-deleted remotely, in which case it selects the recorded parent or remote
-default branch.
-
-Get refuses local-only commits, local advances, divergence, ambiguous deletion,
-dirty files, conflicts, active Git operations, or additional worktrees. A
-refusal may refresh remote-tracking refs, but it does not move an ordinary local
-branch or replace working files.
-
-### Commit and Save (`wipstream.saveup`)
-
-Run this to hand work to the remote:
-
-1. Save file-backed VS Code documents in the selected repository.
-2. Stage all non-ignored additions, modifications, and deletions.
-3. If content changed, ask for a checkpoint message and commit it on the
-   checked-out branch.
-4. Fetch and classify every branch.
-5. Atomically publish all safe local advances with exact leases and apply safe,
-   unrelated remote advances locally.
-
-A successful result means every ordinary local branch name and tip equals the
-remote. An unsuccessful handoff retains the local checkpoint and explicitly
-warns not to resume from another clone. Git commit hooks are honored, and dirty
-submodules are refused.
-
-Commands that may contact the remote show a cancellable progress notification.
-Cancellation stops only the active fetch or push; it never interrupts a local
-commit, checkout, configuration change, or ref transaction. If journaling has
-already begun, WipStream keeps the operation receipt incomplete and requires it
-to be inspected before another mutation. There is no fixed network timeout.
-
-## A multi-computer session
-
-1. On computer A, run **Get from Remote**, edit, then run **Commit and Save**.
-2. Wait for the successful remote-handoff message.
-3. On computer B, run **Get from Remote** before editing.
-4. Check out the branch you intend to continue using VS Code's normal Git
-   branch picker if it is not already checked out.
-5. Edit and run **Commit and Save** again.
-
-Several branches may exist and be consulted in the clone, but only the one
-checked-out branch supplies the working directory being edited.
-
-Switching computers never requires **Finish Branch**. After Commit and Save
-reports a successful handoff, the second computer may close VS Code; the first
-computer can later Get from Remote and continue the same branch with those
-changes intact. Finish is only for deliberately completing the branch into its
-parent.
-
-## Optional branch lifecycle
-
-- **Start Branch** creates a normal branch from the current branch, records
-  that parent intent, and carries existing uncommitted files without committing
-  them.
-- **Update from Parent** retrieves current remote state and merges the recorded
-  or confirmed parent. It never performs a hidden rebase.
-- **Finish Branch** first saves, verifies ancestry, fast-forwards the parent,
-  and asks whether to retain or delete the completed branch.
-- **Condense Branch (Advanced)** explicitly replaces two or more
-  branch-exclusive checkpoint commits with one tree-equivalent commit after a
-  preview and confirmation. It has no default keybinding.
-
-Parent changes discovered during Get or Save are advisories. Work can continue;
-Update is required only before an ancestry-dependent action such as Finish when
-the parent advanced independently.
-
-## Conflict recovery and Undo
-
-**Reconcile with Remote** is offered only when the checked-out branch has true
-local/remote divergence. It merges the fetched remote tip into the local
-checkpointed branch. If Reconcile or Update conflicts, WipStream records the
-paths and exposes only **Continue Pending Merge** and **Abort Pending Merge**.
-Abort verifies the complete restored branch, index, worktree, and Git-operation
-state before claiming success.
-
-**Undo Last Action** is shown only for the latest eligible WipStream operation.
-It requires a clean single worktree and the exact recorded local,
-configuration, checkout, and remote after-state. It reverses remote refs with
-exact leases and local refs transactionally. Any later edit, commit, branch
-move, or remote change blocks Undo rather than guessing.
-
-Human-readable receipts and recovery refs live in private Git metadata under
-`.git`; they are never tracked project files.
-
-## One-worktree rule
-
-WipStream supports multiple separate clones and rejects repositories with
-linked Git worktrees. It never runs `git worktree add`, `move`, `repair`,
-`prune`, `unlock`, or `remove`.
-
-Use a separate ordinary branch for separate work. Only one branch is checked
-out in a clone at a time. This keeps the working directory, index, checkout,
-and command receipts in one comprehensible state. AI agents working in this
-repository must follow the same rule: create or use a branch in the existing
-clone, never create a second worktree as a sandbox.
-
-## Commands and keyboard shortcuts
-
-The normal commands keep their original IDs and chords:
-
-| Command | ID | Key |
+| What is checked out | Start Branch creates | Finish Branch will incorporate it into |
 | --- | --- | --- |
-| Initialize Repository | `wipstream.init` | `Ctrl+W`, then `I` |
-| Get from Remote | `wipstream.resume` | `Ctrl+W`, then `G` |
-| Commit and Save | `wipstream.saveup` | `Ctrl+W`, then `S` |
+| `main` | `histories-rewrite` based on `main` | `main` |
+| `feature` | `histories-rewrite` based on `feature` | `feature` |
 
-Start and Finish are ordinary Command Palette actions. Update, Reconcile,
-Continue, Abort, and Undo appear only when relevant. Condense is advanced and
-has no default chord.
+Start Branch switches to the new branch. The original branch remains at its
+existing commit. Any uncommitted changes carry into the new branch without
+being committed. Later commits advance the new branch.
 
-## Prerequisites
+`feature` is an ordinary branch name, not a special WipStream branch. A **clean**
+branch has no uncommitted file changes; that does not mean its work has been
+incorporated into `main` or synchronized with the remote.
 
-- A normal, complete Git clone with a reachable remote (default `origin`).
-- A remote with a valid symbolic default branch and atomic-push support.
-- Permission to create, update, and delete ordinary branches.
-- Exactly one worktree for the repository.
+Switch between existing branches using your Git client. WipStream has no
+general branch-switching command.
 
-Files excluded by `.gitignore` and empty directories are not committed.
+## Save work without finishing the task
 
-## Install from a VSIX
+Run **WipStream: Commit and Save** whenever you want to checkpoint and publish
+your work. You can use it repeatedly while a task is unfinished.
 
-Download the `.vsix`, run **Extensions: Install from VSIX...** from the Command
-Palette, and select the file. Or use:
+It saves file-backed VS Code documents in the selected repository, stages all
+non-ignored additions, changes, and deletions, and asks for a commit message if
+there are staged changes. This includes work you had not staged yourself.
+Existing commits made in Fork or another Git client are included in the handoff.
 
-```bash
-code --install-extension /path/to/lewisl.wipstream-<version>.vsix
-```
+It then fetches and synchronizes safe advances across **all ordinary branches**,
+not just the checked-out branch. Files ignored by Git and empty directories are
+not included. Commit hooks are honored; dirty submodules must be handled first.
 
-## Development
+Wait for the successful handoff message. A local checkpoint can succeed while
+publication fails. If WipStream says the handoff failed, stay on this computer
+and resolve the reported problem before continuing elsewhere.
+
+## Continue on another computer
+
+1. On computer A, **Commit and Save** and wait for success.
+2. On computer B, open its existing clone and run **Get from Remote before
+   editing**. Initialize first if this is a newly created clone.
+3. Select the intended work branch with your Git client if necessary.
+4. Work normally. Before returning to A, **Commit and Save** on B, then **Get
+   from Remote** on A.
+
+Get retrieves the remote state for all ordinary branches, including newly
+published branches and safe deletions. It normally preserves the checkout; if
+that branch was deleted remotely, it selects its recorded parent or the remote
+default branch. It refuses dirty files, unpublished local work, divergent
+history, and ambiguous deletions rather than replacing them.
+
+You do **not** need to Finish Branch to switch computers. Finish means the task
+is complete and ready to incorporate into its parent.
+
+## Finish a completed task
+
+Check out the completed work branch and run **WipStream: Finish Branch**.
+
+1. WipStream identifies the destination parent. For a branch created outside
+   WipStream, it asks you to confirm or replace the assumed parent.
+2. The confirmation names both branches, for example **Finish
+   “histories-rewrite” into “main”?** Choose whether to retain the finished
+   branch or delete it locally and remotely. Cancelling here does not save or
+   publish your work.
+3. WipStream runs Commit and Save, verifies that the work branch contains its
+   parent's history, and advances the parent to the finished branch's commit
+   locally and remotely. This is a fast-forward; existing parent history stays
+   included.
+4. It checks out the parent and retains or deletes the finished branch as chosen.
+
+If the parent advanced independently, run **Update from Parent** and resolve
+any conflicts, then retry Finish. Parent changes can result from your own work
+on another branch, even with one user and one active computer.
+
+If you started from `feature`, Finish incorporates the work into `feature`.
+Finishing `feature` into `main` is a separate action. After finishing into
+`main`, use Start Branch for the next task before editing.
+
+## Using Fork, VS Code Git, or the Git command line
+
+These tools can stage, commit, and switch branches in the same clone. Do not
+run competing Git mutations simultaneously with a WipStream command.
+
+A normal local commit can be published by Commit and Save. Amending or rebasing
+an already-published commit can create different local and remote histories,
+even when the files look the same. **History divergence is not itself a file
+conflict.** WipStream uses Git's merge operation to reconcile those histories;
+identical file trees can merge without file changes while retaining both histories.
+
+If Commit and Save reports divergence on the checked-out branch, run
+**Reconcile with Remote**. It requires a clean working directory, merges the
+fetched remote history, and saves the result. For divergence on another branch,
+select that branch with your Git client and address the reported condition.
+
+## When something stops
+
+The normal workflow and recovery commands remain visible in the Command Palette.
+If a command cannot run, its message explains the blocking condition. Open
+**View → Output → WipStream** for the operation and branch details.
+
+| Situation | What to do |
+| --- | --- |
+| Git reports an active WipStream merge with conflicts | Edit the files to the desired final contents, then Continue Pending Merge. Use Abort Pending Merge if you want to restore the recorded pre-merge state. |
+| You completed the merge in another Git client | Run Commit and Save. WipStream recognizes a verifiable completed merge and closes its stale record while preserving subsequent work. |
+| You already aborted the merge in another Git client | If the exact recorded state is restored, Commit and Save or Abort Pending Merge closes the stale record. |
+| Git has no active operation but WipStream still reports an incomplete attempt | Run Recover Incomplete Operation, inspect the recorded and current state, and choose Keep Current State if that is the state you want to retain. Then Commit and Save. |
+| Git has an unrelated rebase, cherry-pick, or other active operation | Finish or abort it in your Git client first. WipStream will not treat it as its recorded merge. |
+| Publication fails or is cancelled | Keep working in the current clone. Address the reported cause; use recovery if an incomplete attempt blocks retry, then Commit and Save again. |
+
+Continue stages the resolved files and commits the merge, then runs Commit and
+Save. Review the resulting file contents before continuing. Abort verifies the
+restored state before reporting success; it never resets a completed merge to
+try to recreate a missing Git operation.
+
+**Recover Incomplete Operation** preserves current files, staged changes,
+untracked files, commits, refs, and recovery history. It closes only the selected
+attempt and refuses to run while Git has an active operation or unresolved
+index conflicts. It does not publish, undo the attempt, or certify synchronization.
+If several attempts are incomplete, inspect and resolve each one.
+
+Automatic recognition is conservative. Older receipts record a target branch
+name instead of its exact commit; if that history no longer establishes the
+outcome, explicit recovery is required. Do not delete receipt files manually.
+
+## Commands at a glance
+
+| Command | Purpose | Shortcut |
+| --- | --- | --- |
+| Initialize Repository | Set up and synchronize a clone | `Ctrl+W`, then `I` |
+| Get from Remote | Retrieve all branches before resuming here | `Ctrl+W`, then `G` |
+| Commit and Save | Checkpoint work and synchronize all branches | `Ctrl+W`, then `S` |
+| Start Branch | Begin a task from the current branch | Command Palette |
+| Finish Branch | Incorporate completed work into its parent | Command Palette |
+| Update from Parent | Bring the parent's changes into the work branch | Command Palette |
+| Reconcile with Remote | Merge divergent local and remote histories | Command Palette |
+| Continue Pending Merge | Commit a resolved merge and save | Command Palette |
+| Abort Pending Merge | Abort the recorded merge and verify restoration | Command Palette |
+| Recover Incomplete Operation | Inspect a stopped attempt and keep the current state | Command Palette |
+| Undo Last Action | Reverse the latest eligible WipStream action | Shown when eligible |
+| Condense Branch (Advanced) | Replace branch-only checkpoint history with one commit | Shown on work branches |
+
+## Safety and implementation details
+
+WipStream is intended for one person, multiple separate clones, and one active
+editing clone. It is not a team workflow or pull-request manager. Synchronization
+uses exact expected commit IDs and atomic remote publication. Finish and Save
+refuse unsafe changes to other branches as well as the current one.
+
+Operation receipts and recovery refs live in private Git metadata under `.git`.
+They are local to each clone. A recovered operation retains its original history
+and is not eligible for Undo; recovery cannot make earlier work unexpectedly
+undoable. Ordinary Undo requires the exact recorded state and refuses later
+edits, commits, branch changes, or remote changes.
+
+Network operations are cancellable, without a fixed timeout. Cancellation does
+not interrupt a local commit or ref transaction. Git state events refresh the
+extension's advisory context after external changes; they never trigger a
+background commit, merge, fetch, push, recovery, or branch mutation.
+
+## Development and installation
 
 ```bash
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.2.5.vsix --force
+code --install-extension dist/lewisl.wipstream-0.2.6.vsix --force
 ```
 
-`npm test` uses disposable local bare remotes and clones; it never contacts a
-network service. `npm run test:live` packages the extension, creates an isolated
-two-clone fixture and VS Code profile, and prints verification and cleanup
-commands.
+Alternatively, install the packaged file with **Extensions: Install from
+VSIX...**. Install the same version on each computer used for the workflow.
 
-Every command writes its operation id, affected branches, result, and safe next
-action to the **WipStream** Output channel. The extension has no background
-commit, merge, pull, push, or branch mutation.
+`npm test` uses disposable local remotes and ordinary clones without contacting
+a network service. `npm run test:live` creates an isolated two-clone fixture and
+VS Code profile for manual testing. Tests and development must not create linked
+Git worktrees.
