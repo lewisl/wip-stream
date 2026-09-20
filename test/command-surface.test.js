@@ -14,18 +14,19 @@ const primary = [
   { id: "wipstream.saveup", title: "Commit and Save", key: "ctrl+w s" },
 ];
 const contextual = [
-  ["wipstream.start", "wipstream.initialized"],
-  ["wipstream.finish", "wipstream.finishAvailable"],
-  ["wipstream.update", "wipstream.updateAvailable"],
-  ["wipstream.reconcile", "wipstream.reconcileAvailable"],
-  ["wipstream.continue", "wipstream.pendingMerge"],
-  ["wipstream.abort", "wipstream.pendingMerge"],
+  ["wipstream.start", undefined],
+  ["wipstream.finish", undefined],
+  ["wipstream.update", undefined],
+  ["wipstream.reconcile", undefined],
+  ["wipstream.continue", undefined],
+  ["wipstream.abort", undefined],
+  ["wipstream.recover", undefined],
   ["wipstream.undo", "wipstream.undoAvailable"],
   ["wipstream.condense", "wipstream.condenseAvailable"],
 ];
 const removedLegacy = ["wipstream.tofeature", "wipstream.tomain"];
 const cancellable = ["init", "resume", "saveup", "finish", "update", "reconcile", "continue", "undo", "condense"];
-const localOnly = ["start", "abort"];
+const localOnly = ["start", "abort", "recover"];
 
 const declared = new Map(packageJson.contributes.commands.map(({ command, title }) => [command, title]));
 for (const { id, title } of primary) assert.equal(declared.get(id), title);
@@ -39,7 +40,10 @@ assert.deepEqual(
 );
 
 const palette = new Map(packageJson.contributes.menus.commandPalette.map(({ command, when }) => [command, when]));
-for (const [id, when] of contextual) assert.equal(palette.get(id), when, `${id} has contextual visibility`);
+for (const [id, when] of contextual) {
+  assert.ok(palette.has(id), `${id} is present in the command palette`);
+  assert.equal(palette.get(id), when, `${id} has the intended visibility`);
+}
 for (const id of removedLegacy) assert.equal(palette.has(id), false, `${id} is absent from the command palette`);
 
 for (const id of [...primary.map(({ id }) => id), ...contextual.map(([id]) => id)]) {

@@ -18,6 +18,7 @@ import {
   recordOperationOutcome,
   recoveryRef,
   withMutationBoundary,
+  PendingMerge,
 } from "./operations";
 import {
   commitAndSave,
@@ -49,7 +50,16 @@ export interface UpdateFromParentResult {
 export interface FinishBranchOptions {
   readonly save?: CommitAndSaveHooks;
   readonly selectParent?: ParentSelector;
-  readonly chooseDisposition: () => Promise<FinishBranchDisposition | undefined>;
+  readonly chooseDisposition: (preview: FinishBranchPreview) => Promise<FinishBranchDisposition | undefined>;
+}
+
+export interface FinishBranchPreview {
+  readonly branch: string;
+  readonly parent: string;
+}
+
+interface PreparedFinish extends FinishBranchPreview {
+  readonly disposition: FinishBranchDisposition;
 }
 
 export interface FinishBranchResult {
@@ -99,7 +109,8 @@ async function resolveParent(
   repo: GitRepository,
   branch: string,
   remote: string,
-  selectParent?: ParentSelector
+  selectParent?: ParentSelector,
+  persist = true
 ): Promise<string> {
   const recorded = await getBranchParent(repo, branch);
   if (recorded) {
@@ -122,7 +133,9 @@ async function resolveParent(
   if (selected === branch || !(await repo.validateBranchName(selected)) || !(await repo.branchExists(selected))) {
     return fail("INVALID_PARENT", `“${selected}” is not a valid, different local parent branch.`);
   }
-  await setBranchParent(repo, branch, selected);
+  if (persist) {
+    await setBranchParent(repo, branch, selected);
+  }
   return selected;
 }
 
@@ -206,6 +219,18 @@ async function updateFromParentUnlocked(
   const before = await repo.hash(repo.localRef(branch));
   const preIndexTree = await repo.indexTree();
   const preStatus = await repo.statusPorcelain();
+  const mergeTargetCommit = await repo.hash(repo.localRef(parent));
+  const pendingMerge: PendingMerge = {
+    kind: "merge",
+    command: "Update from Parent",
+    branch,
+    mergeTarget: repo.localRef(parent),
+    mergeTargetCommit,
+    preHead: before,
+    preIndexTree,
+    preStatus,
+    conflicts: [],
+  };
   const plan = createOperationPlan({
     command: "Update from Parent",
     checkout: { before: branch, after: branch },
@@ -222,18 +247,15 @@ async function updateFromParentUnlocked(
     proposed: before,
   }]));
   try {
-    await withMutationBoundary(repo, plan.operationId, "merge", () => repo.merge(parent));
+    await withMutationBoundary(repo, plan.operationId, "merge", async () => {
+      await recordPendingMerge(repo, plan.operationId, pendingMerge);
+      await repo.merge(mergeTargetCommit);
+    });
   } catch (error) {
     const conflicts = await repo.conflictPaths();
     if (error instanceof GitError && (await repo.operationInProgress()) && conflicts.length) {
       await recordPendingMerge(repo, plan.operationId, {
-        kind: "merge",
-        command: "Update from Parent",
-        branch,
-        mergeTarget: repo.localRef(parent),
-        preHead: before,
-        preIndexTree,
-        preStatus,
+        ...pendingMerge,
         conflicts,
       });
       return { operationId: plan.operationId, branch, parent, updated: false, pending: true, conflicts };
@@ -252,16 +274,47 @@ async function updateFromParentUnlocked(
 }
 
 export async function finishBranch(repo: GitRepository, options: FinishBranchOptions): Promise<FinishBranchResult> {
-  const saved = await commitAndSave(repo, options.save);
+  const prepared = await withRepositoryCommandLock(repo, "Finish Branch preview", async (): Promise<PreparedFinish> => {
+    const remote = await requireLifecycleRepository(repo, "Finish Branch", false);
+    const branch = await repo.currentBranch();
+    if (!branch) return fail("DETACHED_HEAD", "Check out the work branch you want to finish.");
+    if (branch === await resolveRemoteTrackingDefaultBranch(repo, remote)) {
+      return fail("DEFAULT_BRANCH", `“${branch}” is the remote default branch. Check out the work branch you want to finish, or use Start Branch for new work.`);
+    }
+    const parent = await resolveParent(repo, branch, remote, options.selectParent, false);
+    if (!(await repo.isAncestor(repo.localRef(parent), repo.localRef(branch)))) {
+      return fail("PARENT_UPDATE_REQUIRED", `Parent “${parent}” advanced independently. Run Update from Parent before finishing “${branch}”.`);
+    }
+    const disposition = await options.chooseDisposition({ branch, parent });
+    if (disposition !== "retain" && disposition !== "delete") {
+      return fail("CANCELLED", "Finish Branch was cancelled before saving or publishing work.");
+    }
+    if (await repo.currentBranch() !== branch) {
+      return fail("CHECKOUT_CHANGED", "The checked-out branch changed during the Finish preview. Review the branch and run Finish Branch again.");
+    }
+    return { branch, parent, disposition };
+  });
+  const saved = await commitAndSave(repo, {
+    ...options.save,
+    saveDocuments: async () => {
+      if (await repo.currentBranch() !== prepared.branch) {
+        return fail("CHECKOUT_CHANGED", "The checked-out branch changed after the Finish preview. Select the intended work branch and retry.");
+      }
+      await options.save?.saveDocuments?.();
+      if (await repo.currentBranch() !== prepared.branch) {
+        return fail("CHECKOUT_CHANGED", "The checked-out branch changed while saving documents. Select the intended work branch and retry.");
+      }
+    },
+  });
   if (!saved.published) {
     return fail("SAVE_HANDOFF_INCOMPLETE", `${saved.message} Finish did not move the parent branch.`);
   }
-  return withRepositoryCommandLock(repo, "Finish Branch", () => finishBranchUnlocked(repo, options, saved));
+  return withRepositoryCommandLock(repo, "Finish Branch", () => finishBranchUnlocked(repo, prepared, saved));
 }
 
 async function finishBranchUnlocked(
   repo: GitRepository,
-  options: FinishBranchOptions,
+  prepared: PreparedFinish,
   saved: CommitAndSaveResult
 ): Promise<FinishBranchResult> {
   const remote = await requireLifecycleRepository(repo, "Finish Branch", true);
@@ -269,7 +322,11 @@ async function finishBranchUnlocked(
   if (!branch) {
     return fail("DETACHED_HEAD", "Check out the branch to finish.");
   }
-  const parent = await resolveParent(repo, branch, remote, options.selectParent);
+  const recordedParent = await getBranchParent(repo, branch);
+  if (branch !== prepared.branch || (recordedParent && recordedParent !== prepared.parent)) {
+    return fail("FINISH_TARGET_CHANGED", "The branch or its parent changed after confirmation. Review the branches and run Finish Branch again.");
+  }
+  const { parent, disposition } = prepared;
   await requireFetchedParity(repo, remote);
   if (!(await repo.isAncestor(repo.localRef(parent), repo.localRef(branch)))) {
     return fail(
@@ -277,11 +334,6 @@ async function finishBranchUnlocked(
       `Parent “${parent}” advanced independently. Run Update from Parent before finishing “${branch}”.`
     );
   }
-  const disposition = await options.chooseDisposition();
-  if (disposition !== "retain" && disposition !== "delete") {
-    return fail("CANCELLED", "Finish Branch was cancelled before choosing whether to retain the branch.");
-  }
-
   const parentTip = await repo.hash(repo.localRef(parent));
   const branchTip = await repo.hash(repo.localRef(branch));
   const remoteUpdates: GitRemoteRefUpdate[] = [{
@@ -310,7 +362,11 @@ async function finishBranchUnlocked(
       `branch.${branch}.merge`,
       `branch.${branch}.wipstreamParent`,
     ].map(async (key) => ({ key, before: await repo.getConfigValues(key), after: [] })))
-    : [];
+    : [{
+      key: `branch.${branch}.wipstreamParent`,
+      before: await repo.getConfigValues(`branch.${branch}.wipstreamParent`),
+      after: [parent],
+    }];
   const plan = createOperationPlan({
     command: "Finish Branch",
     localRefUpdates: localUpdates,
@@ -331,7 +387,7 @@ async function finishBranchUnlocked(
   await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
   await applyLocalRefTransaction(repo, plan);
   await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(parent));
-  if (disposition === "delete") {
+  if (configurationChanges.length) {
     await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
       for (const change of configurationChanges) await repo.replaceConfigValues(change.key, change.after);
     });

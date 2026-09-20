@@ -669,7 +669,7 @@ async function commitAndSaveUnlocked(
     ) ? currentBranch : undefined;
     return unsuccessful(
       "unsafe-branches",
-      `The local checkpoint is safe, but automatic reconciliation stopped because ${unsafe.map((branch) => `${branch.name}: ${branch.reason}`).join("; ")}.`,
+      `The local checkpoint is safe, but automatic reconciliation stopped because ${unsafe.map((branch) => `${branch.name}: ${branch.reason}`).join("; ")}.${reconcileBranch ? " Different history does not necessarily mean file conflicts. Run Reconcile with Remote to merge the histories." : ""}`,
       { unsafeBranches: unsafe, reconcileBranch }
     );
   }

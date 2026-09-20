@@ -11,6 +11,7 @@ import {
 import { GitError, GitRepository } from "./git";
 import {
     FinishBranchDisposition,
+    FinishBranchPreview,
     finishBranch,
 } from "./lifecycle-workflow";
 import {
@@ -130,10 +131,10 @@ export async function selectParent(assumedParent: string): Promise<string | unde
     return askValue("Confirm or replace the parent branch", assumedParent);
 }
 
-async function chooseFinishDisposition(): Promise<FinishBranchDisposition | undefined> {
+async function chooseFinishDisposition({ branch, parent }: FinishBranchPreview): Promise<FinishBranchDisposition | undefined> {
     const choice = await vscode.window.showWarningMessage(
-        "Finish will advance the parent to this branch. Retain the completed branch name or delete it locally and remotely?",
-        { modal: true },
+        `Finish “${branch}” into “${parent}”?`,
+        { modal: true, detail: `WipStream will first Commit and Save, then advance “${parent}” locally and remotely and check it out. Retain “${branch}”, or delete that completed branch locally and remotely?` },
         "Retain Branch",
         "Delete Branch"
     );
@@ -257,6 +258,79 @@ export async function refreshActiveCommandContexts(): Promise<void> {
     await refreshCommandContexts(activeRepository);
 }
 
+interface GitStateRepository {
+    readonly state: { onDidChange: vscode.Event<void> };
+}
+
+interface GitStateAPI {
+    readonly repositories: readonly GitStateRepository[];
+    readonly onDidOpenRepository: vscode.Event<GitStateRepository>;
+    readonly onDidCloseRepository: vscode.Event<GitStateRepository>;
+}
+
+interface GitStateExtension {
+    getAPI(version: 1): GitStateAPI;
+}
+
+/** Follow VS Code's Git state events, including changes made in other clients. */
+export function registerContextRefresh(context: vscode.ExtensionContext): void {
+    let disposed = false;
+    let requested = false;
+    let running = false;
+    const refresh = async (): Promise<void> => {
+        requested = true;
+        if (running || disposed) return;
+        running = true;
+        try {
+            while (requested && !disposed) {
+                requested = false;
+                await refreshActiveCommandContexts();
+            }
+        } catch {
+            // Advisory context must never prevent a command from being invoked.
+        } finally {
+            running = false;
+        }
+    };
+    const subscriptions = new Map<GitStateRepository, vscode.Disposable>();
+    context.subscriptions.push(new vscode.Disposable(() => {
+        disposed = true;
+        for (const subscription of subscriptions.values()) subscription.dispose();
+        subscriptions.clear();
+    }));
+    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => {
+        activeRepository = undefined;
+        void refresh();
+    }));
+    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        activeRepository = undefined;
+        void refresh();
+    }));
+    context.subscriptions.push(vscode.window.onDidChangeWindowState(state => {
+        if (state.focused) void refresh();
+    }));
+    const extension = vscode.extensions.getExtension<GitStateExtension>("vscode.git");
+    if (extension) {
+        void Promise.resolve(extension.activate()).then(exports => {
+            if (disposed) return;
+            const api = exports.getAPI(1);
+            const watch = (repo: GitStateRepository): void => {
+                if (!subscriptions.has(repo)) subscriptions.set(repo, repo.state.onDidChange(() => { void refresh(); }));
+                void refresh();
+            };
+            for (const repo of api.repositories) watch(repo);
+            context.subscriptions.push(api.onDidOpenRepository(watch));
+            context.subscriptions.push(api.onDidCloseRepository(repo => {
+                subscriptions.get(repo)?.dispose();
+                subscriptions.delete(repo);
+                activeRepository = undefined;
+                void refresh();
+            }));
+        }).catch(() => { /* Git may be disabled; commands still inspect their repository directly. */ });
+    }
+    void refresh();
+}
+
 export async function reportSave(output: vscode.OutputChannel, result: CommitAndSaveResult): Promise<void> {
     appendAdvisories(output, result.advisories);
     if (result.published) {
@@ -277,7 +351,7 @@ export async function reportSave(output: vscode.OutputChannel, result: CommitAnd
     const choice = action
         ? await vscode.window.showWarningMessage(`WipStream: ${result.message}`, action)
         : await vscode.window.showWarningMessage(`WipStream: ${result.message}`);
-    if (choice === action) await vscode.commands.executeCommand(`${EXTENSION_NAME}.reconcile`);
+    if (action && choice === action) await vscode.commands.executeCommand(`${EXTENSION_NAME}.reconcile`);
 }
 
 export async function notifyPendingMerge(

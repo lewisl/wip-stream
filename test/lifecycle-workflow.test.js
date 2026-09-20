@@ -272,10 +272,52 @@ async function runCondense() {
   });
 }
 
+async function runFinishPreviewBeforeSave() {
+  await withFixture("wipstream-finish-preview-", async (fixture) => {
+    const clone = await cloneRepository(fixture, "clone");
+    let saved = false;
+    await expectLifecycleError(() => finishBranch(clone.repo, {
+      save: { saveDocuments: async () => { saved = true; } },
+      chooseDisposition: async () => { assert.fail("Main must not show a finish confirmation"); },
+    }), "DEFAULT_BRANCH");
+    assert.equal(saved, false);
+    await startBranch(clone.repo, "feature");
+    await startBranch(clone.repo, "rewrite");
+    writeFileSync(path.join(clone.directory, "main.txt"), "unsaved checkpoint\n");
+    const localBefore = git(clone.directory, ["show-ref"]);
+    const remoteBefore = git(fixture.remote, ["show-ref"]);
+    const statusBefore = await clone.repo.statusPorcelain();
+    await expectLifecycleError(() => finishBranch(clone.repo, {
+      save: { saveDocuments: async () => { saved = true; } },
+      chooseDisposition: async (preview) => {
+        assert.deepEqual(preview, { branch: "rewrite", parent: "feature" });
+        assert.equal(saved, false, "confirmation precedes document saving and checkpoint creation");
+        return undefined;
+      },
+    }), "CANCELLED");
+    assert.equal(saved, false);
+    assert.equal(git(clone.directory, ["show-ref"]), localBefore);
+    assert.equal(git(fixture.remote, ["show-ref"]), remoteBefore);
+    assert.equal(await clone.repo.statusPorcelain(), statusBefore);
+    git(clone.directory, ["switch", "-c", "imported", "main"]);
+    assert.equal(configValue(clone.directory, "branch.imported.wipstreamParent"), undefined);
+    await expectLifecycleError(() => finishBranch(clone.repo, {
+      selectParent: async () => "main",
+      chooseDisposition: async (preview) => {
+        assert.deepEqual(preview, { branch: "imported", parent: "main" });
+        return undefined;
+      },
+    }), "CANCELLED");
+    assert.equal(configValue(clone.directory, "branch.imported.wipstreamParent"), undefined,
+      "cancelling the preview does not write parent configuration");
+  });
+}
+
 Promise.resolve()
   .then(runStartCarriesWork)
   .then(runFinishAdvisoryUpdateAndChoices)
   .then(runImportedParentConfirmation)
+  .then(runFinishPreviewBeforeSave)
   .then(runCondense)
   .then(() => console.log("WipStream parent-aware lifecycle tests passed."))
   .catch((error) => {

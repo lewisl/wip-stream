@@ -1,5 +1,6 @@
 import { GitError, GitRepository } from "./git";
 import { fail, WipStreamError } from "./errors";
+import { recoverExternalMerge, requireRecordedMerge } from "./merge-recovery";
 import { commitAndSave, CommitAndSaveHooks, CommitAndSaveResult } from "./generalized-workflow";
 import {
   inspectBranchInventory,
@@ -50,7 +51,7 @@ export interface ContinueMergeResult {
 export interface AbortMergeResult {
   readonly operationId: string;
   readonly command: PendingMerge["command"];
-  readonly restored: true;
+  readonly restored: boolean;
 }
 
 export interface AbortMergeHooks {
@@ -131,7 +132,7 @@ async function reconcileWithRemoteUnlocked(repo: GitRepository): Promise<Reconci
   if (current?.relation !== "diverged" || !current.fetchedRemoteTip) {
     return fail(
       "CURRENT_BRANCH_NOT_DIVERGED",
-      `Reconcile is available only when checked-out branch “${branch}” has diverged from its fetched remote counterpart.`
+      `Checked-out branch “${branch}” has no divergent remote history to reconcile. Run Commit and Save to synchronize, or select the divergent branch in your Git client.`
     );
   }
   const otherUnsafe = inventory.filter(
@@ -148,6 +149,18 @@ async function reconcileWithRemoteUnlocked(repo: GitRepository): Promise<Reconci
   const preIndexTree = await repo.indexTree();
   const preStatus = await repo.statusPorcelain();
   const mergeTarget = repo.remoteTrackingRef(remote, branch);
+  const mergeTargetCommit = current.fetchedRemoteTip;
+  const pendingMerge: PendingMerge = {
+    kind: "merge",
+    command: "Reconcile with Remote",
+    branch,
+    mergeTarget,
+    mergeTargetCommit,
+    preHead: before,
+    preIndexTree,
+    preStatus,
+    conflicts: [],
+  };
   const plan = createOperationPlan({
     command: "Reconcile with Remote",
     checkout: { before: branch, after: branch },
@@ -164,18 +177,15 @@ async function reconcileWithRemoteUnlocked(repo: GitRepository): Promise<Reconci
     proposed: before,
   }]));
   try {
-    await withMutationBoundary(repo, plan.operationId, "merge", () => repo.merge(mergeTarget));
+    await withMutationBoundary(repo, plan.operationId, "merge", async () => {
+      await recordPendingMerge(repo, plan.operationId, pendingMerge);
+      await repo.merge(mergeTargetCommit);
+    });
   } catch (error) {
     const conflicts = await repo.conflictPaths();
     if (error instanceof GitError && await repo.operationInProgress()) {
       await recordPendingMerge(repo, plan.operationId, {
-        kind: "merge",
-        command: "Reconcile with Remote",
-        branch,
-        mergeTarget,
-        preHead: before,
-        preIndexTree,
-        preStatus,
+        ...pendingMerge,
         conflicts,
       });
       return { operationId: plan.operationId, branch, pending: true, conflicts };
@@ -198,7 +208,9 @@ async function pendingReceipt(repo: GitRepository): Promise<OperationReceipt> {
   if (receipts.length !== 1) {
     return fail(
       receipts.length ? "MULTIPLE_PENDING_OPERATIONS" : "NO_PENDING_MERGE",
-      receipts.length ? "More than one WipStream merge is pending." : "No WipStream merge is pending."
+      receipts.length
+        ? "More than one WipStream merge is recorded. Use Recover Incomplete Operation to inspect the attempts."
+        : "No WipStream merge is pending. Use Commit and Save to synchronize, or Recover Incomplete Operation if an interrupted attempt blocks it."
     );
   }
   return receipts[0];
@@ -228,11 +240,19 @@ async function continuePendingMergeUnlocked(
     return fail("UNRESOLVED_CONFLICTS", `Resolve these files before Continue: ${conflicts.join(", ")}.`);
   }
   if (!(await repo.operationInProgress())) {
-    return fail("MERGE_STATE_MISSING", "Git no longer reports the recorded merge; Abort or inspect recovery state.");
+    const recovered = await recoverExternalMerge(repo, receipt);
+    if (recovered?.recovery?.resolution === "merge-completed-externally") {
+      return { operationId: receipt.plan.operationId, command: pending.command };
+    }
+    if (recovered) {
+      return fail("MERGE_ALREADY_ABORTED", "Git already aborted the merge; WipStream's record is now closed. Run Commit and Save to synchronize or Reconcile with Remote to retry.");
+    }
+    return fail("MERGE_STATE_MISSING", "Git no longer reports the recorded merge. Run WipStream: Recover Incomplete Operation to inspect it and preserve your current files and commits.");
   }
   if ((await repo.currentBranch()) !== pending.branch) {
     return fail("CHECKOUT_CHANGED", `Pending merge belongs to branch “${pending.branch}”.`);
   }
+  await requireRecordedMerge(repo, pending);
   await repo.stageAll();
   await repo.commitMerge();
   await recordOperationPhase(repo, receipt.plan.operationId, "after-merge");
@@ -262,8 +282,17 @@ async function abortPendingMergeUnlocked(
   const receipt = await pendingReceipt(repo);
   const pending = receipt.pendingMerge as PendingMerge;
   if (!(await repo.operationInProgress())) {
-    return fail("MERGE_STATE_MISSING", "Git no longer reports the recorded merge; the receipt was retained.");
+    const recovered = await recoverExternalMerge(repo, receipt);
+    if (recovered) {
+      return {
+        operationId: receipt.plan.operationId,
+        command: pending.command,
+        restored: recovered.recovery?.resolution === "merge-aborted-externally",
+      };
+    }
+    return fail("MERGE_STATE_MISSING", "Git no longer reports the recorded merge. Run WipStream: Recover Incomplete Operation to preserve your current files and commits.");
   }
+  await requireRecordedMerge(repo, pending);
   await repo.abortMerge();
   await hooks.afterGitAbort?.();
   const actualBranch = await repo.currentBranch();
@@ -279,7 +308,7 @@ async function abortPendingMergeUnlocked(
   ) {
     return fail(
       "ABORT_VERIFICATION_FAILED",
-      `Git merge --abort did not restore the recorded state for “${pending.branch}”. Operation “${receipt.plan.operationId}” remains pending.`
+      `Git merge --abort did not restore the recorded state for “${pending.branch}”. Operation “${receipt.plan.operationId}” remains pending. Run Recover Incomplete Operation to inspect it and preserve your current work.`
     );
   }
   await abortOperation(repo, receipt.plan.operationId);
