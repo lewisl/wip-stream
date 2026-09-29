@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.7
+
+- Document the Git command sequence for occasional work outside VS Code,
+  including remote updates, optional branch creation, and committed, pushed
+  checkpoints before switching computers.
+- Include the guide in the README displayed in VS Code's Extensions pane.
+
 ## 0.2.5
 
 - Moved visible VS Code command handlers and registration into a focused source
