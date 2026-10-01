@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.8
+
+Improve startup of wip-stream when initializing in an existing local clone of its existing remote:
+
+- At initialization provide choices for:
+  - Treat the remote as authoritative:  save the local version in a new clone (optional) and retrieve the remote
+  - Commit the local clone and publish it to the remote if fast forward can be successful
+  - Resolve differences locally and then save to remote: the initialization stops. User must manually reconcile differences; then come back and run initialization again.
+  - Cancel the intialization.
+- Document exact git commands that will correctly update the remote when not using the wip-stream VS Code extension and the commands for resuming work by "pulling" the remote to work locally when not using the tip-stream VS Code extension. These are in the readme.
+
 ## 0.2.7
 
 - Document the Git command sequence for occasional work outside VS Code,
