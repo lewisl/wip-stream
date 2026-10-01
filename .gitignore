@@ -1,7 +1,5 @@
 out
 node_modules
 .vscode-test/
-*.vsix
-dist/
 .DS_Store
 .serena
