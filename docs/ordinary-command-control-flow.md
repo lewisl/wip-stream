@@ -8,11 +8,11 @@ The commands are:
 
 | Command | Command ID | Workflow entry point |
 | --- | --- | --- |
-| Initialize Repository | `wipstream.init` | `initializeRepository()` |
+| Initialize Repository | `wipstream.init` | `inspectRepositorySetup()` / `executeRepositorySetup()` |
 | Get from Remote | `wipstream.resume` | `getFromRemote()` |
 | Commit and Save | `wipstream.saveup` | `commitAndSave()` |
 
-The relevant implementation is in [`src/extension.ts`](../src/extension.ts), [`src/commands.ts`](../src/commands.ts), and [`src/generalized-workflow.ts`](../src/generalized-workflow.ts). Repository classification is in [`src/repository-model.ts`](../src/repository-model.ts), mutation journaling is in [`src/operations.ts`](../src/operations.ts), locking is in [`src/repository-safety.ts`](../src/repository-safety.ts), and Git calls are in [`src/git.ts`](../src/git.ts).
+The adapters are [`src/extension.ts`](../src/extension.ts), [`src/registered-commands.ts`](../src/registered-commands.ts), [`src/commands.ts`](../src/commands.ts), and [`src/setup-ui.ts`](../src/setup-ui.ts). Setup orchestration is in [`src/setup-workflow.ts`](../src/setup-workflow.ts); Get, Save, and shared synchronization are in [`src/generalized-workflow.ts`](../src/generalized-workflow.ts). Repository classification is in [`src/repository-model.ts`](../src/repository-model.ts), mutation journaling is in [`src/operations.ts`](../src/operations.ts), locking is in [`src/repository-safety.ts`](../src/repository-safety.ts), and Git calls are in [`src/git.ts`](../src/git.ts).
 
 ## Common dispatch and return path
 
@@ -50,11 +50,17 @@ The common `fail()` helper throws a `WipStreamError`; it does not return an erro
 
 Commit and Save has an additional non-exception path. Once it has made or retained a safe local checkpoint, several expected synchronization failures are converted to a `CommitAndSaveResult` with `published: false` and `handoff: "do-not-resume"`. `reportSave()` renders that result as a warning instead of an error. This distinction is detailed in the Commit and Save section.
 
+Setup execution returns a tagged `SetupResult`: `completed`, `cancelled`,
+`preview-required`, `reconciliation-required`, or `failed`. Its adapter checks
+`kind`, not `published`: completed remote adoption deliberately has
+`published: false` because it never pushes. A failed result can name an incomplete
+receipt and retained backup; it never implies that earlier boundaries were undone.
+
 ## Common branch classification
 
 The workflows snapshot remote-tracking tips before fetch, fetch and prune all ordinary remote branches, snapshot again, and call `inspectBranchInventory()`. That function returns one `BranchInventoryEntry` per name found in local refs, fetched remote refs, or the pre-fetch remote snapshot.
 
-| `relation` | Meaning after fetch | Initialize / Commit and Save | Get from Remote |
+| `relation` | Meaning after fetch | Local-work setup / Commit and Save | Get from Remote |
 | --- | --- | --- | --- |
 | `equal` | Local and fetched remote tips match | No ref update | No ref update |
 | `local-ahead` | Local history strictly contains remote history | Publish local tip | Reject as unpublished local work |
@@ -64,11 +70,18 @@ The workflows snapshot remote-tracking tips before fetch, fetch and prune all or
 | `diverged` | Neither tip contains the other | Reject automatic reconciliation | Reject automatic retrieval |
 | `remotely-deleted` | A branch existed in the pre-fetch snapshot but is now absent remotely | Delete the local branch only if its tip still equals the previously observed remote tip; otherwise reject | Same safe-delete rule |
 
-For Initialize, an unsafe classification throws. For Commit and Save, it becomes a `published: false` result after any new checkpoint has been retained. Get uses the stricter `unsafeBranches()` check, which also rejects `local-ahead` and `local-only`.
+For local-work setup, divergence becomes `reconciliation-required` after any
+checkpoint has been retained, with nothing published on any branch. Commit and
+Save returns `published: false`. Get uses the stricter `unsafeBranches()` check,
+which also rejects `local-ahead` and `local-only`. Explicit remote adoption is
+different: it replaces every ordinary local branch with the approved remote
+tip, including divergent histories, and removes branches absent remotely.
 
 ## Shared bidirectional reconciliation
 
-Initialize Repository and Commit and Save both finish through `applyBidirectionalReconciliation()`. It returns an `AppliedReconciliationResult`, which is also the complete shape of `InitializeRepositoryResult`:
+Local-work setup and Commit and Save finish through
+`applyBidirectionalReconciliation()`. It returns an `AppliedReconciliationResult`
+(also the legacy clean-only `InitializeRepositoryResult` shape):
 
 ```ts
 {
@@ -87,12 +100,12 @@ The sequence is:
 2. `createOperationPlan()` returns an immutable schema-2 `OperationPlan` containing the command, local and remote transitions, checkout transition, configuration changes, optional checkpoint, and destructive effects. There is no parallel remote-lease array; schema-1 plans are validated and normalized when their receipts are read.
 3. `beginOperation()` writes and returns a planned `OperationReceipt`. From this point onward, a stopped operation can be discovered by `inspectIncompleteOperations()`.
 4. Verify that remote-tracking refs, the checkout, local branch tips, and the worktree still match the state that was classified. A mismatch throws and leaves the receipt incomplete for inspection.
-5. For Commit and Save with a new checkpoint, create a recovery ref for the pre-checkpoint tip inside a journaled `local-refs` mutation boundary.
+5. For a new checkpoint, create a recovery ref for the pre-checkpoint tip inside a journaled `local-refs` mutation boundary.
 6. If local branches must be published, call `pushRefsAtomic()` inside a `remote-push` boundary. It issues one atomic push with one exact `--force-with-lease` per ref and returns `void`. Fetch again inside a `remote-fetch` boundary, verify the expected remote tips, and recheck local state.
 7. If the checked-out local ref will move, detach `HEAD` inside a `checkout` boundary. `applyLocalRefTransaction()` then creates recovery refs for displaced tips and applies every local create, update, and delete in one expected-old `git update-ref --stdin` transaction; it returns `void`.
 8. Switch to the target branch when the checked-out ref moved or the requested target differs from the original checkout.
-9. `verifyBranchParity()` returns `void` only when every ordinary local and selected-remote branch has relation `equal`; otherwise it throws.
-10. Apply planned Git configuration changes inside a `configuration` boundary. Configuration is deliberately deferred until ref parity has been proved.
+9. Verify all ordinary branch tips, the target checkout, and non-ignored cleanliness.
+10. Apply planned Git configuration changes inside a `configuration` boundary, then verify their exact values and repository state again. Configuration is deliberately deferred until ref parity and clean checkout have been proved.
 11. `completeOperation()` records the final refs, checkout, and status, marks and returns the completed receipt, and prunes old completed receipts. The reconciliation helper discards that receipt and returns the `AppliedReconciliationResult` shown above.
 
 `withMutationBoundary()` records `before-<boundary>`, calls the supplied action, records `after-<boundary>`, and returns the action's value unchanged. If the action throws, the receipt remains at its last recorded phase.
@@ -104,36 +117,113 @@ The sequence is:
 ```text
 init handler(): Promise<void>
   -> selectRepository(): Promise<GitRepository>
-  -> saveRepositoryDocuments(repo): Promise<void>
   -> readRepositoryConfiguration(repo): Promise<
        { kind: "uninitialized" } |
        { kind: "initialized"; remote: string }
      >
   -> askValue("Git remote", "origin"): Promise<string>  [uninitialized only]
-  -> initializeRepository(repo, requestedRemote):
-       Promise<InitializeRepositoryResult>
-  -> showSuccess(...): void
+  -> runRepositorySetup(output, repo, requestedRemote, signal): Promise<void>
+       -> inspectRepositorySetup(repo, requestedRemote, hooks)
+            Promise<SetupInspection>
+       -> authority / backup / discard dialogs, when required
+       -> executeRepositorySetup(repo, inspection, choice, hooks)
+            Promise<SetupResult>
+       -> completion, warning, cancellation, or fresh-preview UI
   <- void
 ```
 
-Saving documents happens before workflow preflight. It moves dirty file-backed editor buffers into the working tree; Initialize then refuses that dirty working tree rather than silently committing it.
+Inspection does not save editor documents. The adapter supplies saving,
+checkpoint-message, editor-signature, and cancellation hooks; saving happens
+only after an authorized execution choice. Dismissing any authority, backup,
+folder-picker, or discard dialog does not execute the workflow.
 
-An uninitialized repository gets a trimmed remote string from the user. For an already initialized repository the adapter passes `undefined`, and the workflow uses the configured WipStream remote.
+An uninitialized repository gets a trimmed remote string. An initialized clone
+uses its configured remote but is still fully inspected, including copied
+initialization markers. The command ID and shortcut are unchanged.
 
-### Workflow sequence
+### Inspection and approval
 
-`initializeRepository()` acquires the `Initialize Repository` command lock and returns `initializeRepositoryUnlocked()`'s result.
+1. `inspectRepositorySetup()` acquires and releases the inspection command lock.
+   Preflight permits dirty ordinary files but refuses unsupported layouts,
+   active Git operations, conflicts, and incomplete WipStream operations.
+2. Snapshot remote-tracking tips, fetch all branches, and read the server's
+   actual default branch. Classify every branch, including remote deletions.
+3. Record the checkout, HEAD, all ordinary local tips, status without optional
+   index refresh, raw-index hash, full working-file fingerprint including
+   ignored files, local configuration, and editor path/version/dirty signature.
+4. Present the three authority choices plus Cancel when work differs. A clean
+   matching clone finishes configuration without an unnecessary decision.
+5. Remote authority adds backup/discard/cancel dialogs. A backup folder picker
+   starts at the project's parent; discard requires a second explicit modal
+   confirmation. The preview explains all-branch and working-file effects.
 
-1. `requireRepositoryPreflight()` returns `void` after proving exactly one worktree, a non-bare and non-shallow repository, no active Git operation, no conflicts, a clean worktree, and no incomplete WipStream operation. Any failed check throws with an Initialize-specific message.
-2. `readRepositoryConfiguration()` returns the configured-state union. The requested remote is validated against it, `requireConfiguredRemote()` proves that the remote exists, and `currentBranch()` must return a branch name rather than `null`.
-3. `snapshotRemoteTrackingTips()` returns the pre-fetch `ReadonlyMap<branch, objectId>`. The workflow calls `fetchAllBranches()` (`git fetch --prune` with the full branch refspec) and receives `void`, then obtains the remote default branch, post-fetch tip map, and classified inventory. Classification occurs once, after fetch; the pre-fetch snapshot still distinguishes remote deletion.
-4. `initializeUnsafeBranches()` returns unsafe divergent or ambiguous-deletion entries. A non-empty array causes a throw after remote-tracking refs have been refreshed but before any ordinary local branch, remote branch, checkout, or WipStream configuration change.
-5. The fetched default-branch tip must exist. `verifyAtomicPushSupport()` performs an exact-leased atomic dry-run no-op update and returns `void` or throws.
-6. Build configuration transitions for the full fetch refspec, tracking configuration for every synchronized branch, and `wipstream.remote`. The latter is the initialized marker and is not written yet.
-7. Call the shared `applyBidirectionalReconciliation()` with the remote default branch as `targetCheckout`.
-8. Return its value as `InitializeRepositoryResult`.
+`executeRepositorySetup()` owns a fresh command lock for mutation. It rechecks
+the complete approved state, including fetched remote tips and default branch,
+before saving documents. Saved documents that change this state return
+`preview-required`; the adapter can reinspect, but requires a new choice and
+never carries forward old discard approval. Dirty submodules block execution.
 
-The adapter logs the checkout and all four branch lists, then reports success. The required `operationId` identifies the completed receipt.
+### Local-work and external-reconciliation paths
+
+1. `createCheckpoint()` stages ordinary changes, prompts only when needed,
+   honors commit hooks, and retains the new local checkpoint. This helper is
+   shared with Commit and Save; it needs no temporary initialized marker or
+   nested lock.
+2. Refetch and classify all branches. Divergent or ambiguous-deletion histories
+   return `reconciliation-required`, identifying branches, retaining the
+   checkpoint, and publishing nothing on any branch.
+3. Otherwise prove atomic push support, build full fetch/tracking/initialized
+   configuration, and run shared bidirectional reconciliation. Recheck local
+   and editor state before publication and before local replacement.
+4. Finish on the remote default branch with verified parity and configuration.
+   Return `completed`, `checkpointCreated`, `published: true`,
+   `publishedBranches`, the operation ID, checkout, and branch-effect arrays.
+
+The explicit reconciliation choice returns guidance without saving or
+mutating local work. Use an existing Git tool to incorporate remote history,
+then rerun Initialize and choose local work. Matching file trees do not resolve
+divergent ancestry. A completed external merge is included on retry.
+
+### Remote-adoption path
+
+1. Save approved documents, then either make a verified complete project copy
+   through [`project-backup.ts`](../src/project-backup.ts), or use the explicitly
+   confirmed no-backup choice. The new destination must be outside the project;
+   only this attempt's command lock is excluded. Source changes, unsupported
+   external Git storage, copy failure, or cancellation stop replacement and
+   identify any incomplete backup.
+2. [`adoptRemoteUnlocked()`](../src/remote-adoption.ts) refuses submodule
+   checkouts and ignored-path collisions. It plans exact all-branch updates,
+   file removal/replacement, tracking changes, and backup provenance.
+3. Revalidate before and after `beginOperation()`. Inside `file-replacement`,
+   unlink only approved non-ignored untracked entries and switch detached to
+   the exact remote default commit with discarded tracked changes.
+4. Apply all ordinary ref transitions and recovery refs transactionally, then
+   check out the default branch. No push, merge, or content commit is called.
+5. Refetch and verify the remote remained unchanged, all ordinary local heads
+   match it, files are clean, and ignored entries retain contents and modes.
+6. Record `remote-head` and configuration boundaries, verify the result, and
+   complete the receipt. Return `completed` with `published: false`, branch
+   effects including `replaced`, and the full `backupPath` when present.
+
+Completion offers Open Backup Folder only on user selection. An interruption
+keeps the backup and incomplete receipt. Recover Incomplete Operation displays
+the path, can keep current state without restoration, and directs a fresh
+Initialize attempt; a recovered detached adoption checkout is supported.
+Remote adoption is never eligible for ordinary Undo.
+
+Completion, cancellation, and terminal warning notices do not hold command
+progress open while awaiting dismissal. Their optional backup action can run
+after progress has closed, with opening errors reported separately. Authority,
+discard confirmation, and updated-preview review remain awaited decisions.
+Modal confirmations rely on VS Code's built-in Cancel rather than adding a
+duplicate action.
+
+The legacy `initializeRepository()` clean-only API remains for compatibility
+and its existing tests; the public VS Code Initialize handler uses setup
+inspection/execution instead. Only `kind: "completed"` produces setup success.
+Cancelled, stale, reconciliatory, or failed results report retained local work
+and never imply a completed remote handoff or offer misleading Undo.
 
 ## Get from Remote (`wipstream.resume`)
 
@@ -155,7 +245,7 @@ The adapter does not save documents. `assertNoDirtyDocuments()` throws when a fi
 
 `getFromRemote()` acquires the `Get from Remote` command lock and returns `getFromRemoteUnlocked()`'s result.
 
-1. `requireRepositoryPreflight()` returns `void` after the same structural checks as Initialize: one worktree, non-bare, non-shallow, no active Git operation, no conflicts, a clean worktree, and no incomplete WipStream operation.
+1. `requireRepositoryPreflight()` proves one worktree, non-bare, non-shallow, no active Git operation, no conflicts, a clean worktree, and no incomplete WipStream operation. Unlike setup inspection, Get requires clean files.
 2. `readRepositoryConfiguration()` must return `{ kind: "initialized", remote }`. The workflow proves the remote exists and requires `currentBranch()` to return a branch name.
 3. Snapshot pre-fetch remote-tracking tips, fetch and prune all branches, resolve the remote default, snapshot fetched tips, and return the classified inventory. The meaningful inventory inspection occurs after fetch.
 4. `unsafeBranches()` rejects divergence, local-only branches, unpublished local advances, and ambiguous remote deletion. A rejection may leave updated remote-tracking refs, but it occurs before a plan or ordinary local mutation.
@@ -204,7 +294,7 @@ The document-saving and checkpoint-message calls happen inside the locked workfl
 1. Call `hooks.saveDocuments()` and receive `void` after all dirty file-backed repository documents have been saved.
 2. `requireRepositoryPreflight()` proves one worktree, non-bare, non-shallow, no active Git operation, no conflicts, no dirty submodules, and no incomplete WipStream operation. Its Commit and Save policy intentionally permits ordinary working-tree changes because they are the content to save.
 3. Require initialized configuration, an existing selected remote, and a current ordinary branch.
-4. Read the current branch tip, call `stageAll()` (`git add --all`) and receive `void`, then call `hasStagedChanges()` and receive a boolean.
+4. Call the shared `createCheckpoint()` helper. It reads the current tip, calls `stageAll()` (`git add --all`), then checks `hasStagedChanges()`.
 5. If content is staged, request and validate a message, call `commit()` and receive `void`, then record the before tip, after tip, branch, and message as a `CheckpointTransition`. Git commit hooks run normally. If no content is staged, no message is requested and `checkpointCreated` is `false`.
 6. Require an empty porcelain status. If files changed during checkpoint creation, throw while retaining the local checkpoint.
 
@@ -261,13 +351,13 @@ On a handled synchronization failure, `published` is `false`, `handoff` is `"do-
 
 | Stage | Initialize | Get | Commit and Save |
 | --- | --- | --- | --- |
-| Save VS Code documents | Yes, before workflow | No; refuses unsaved documents | Yes, through a locked hook |
-| Permit dirty ordinary files | No | No | Yes, then stages and checkpoints them |
+| Save VS Code documents | Only after proceeding, under lock; changes require fresh preview | No; refuses unsaved documents | Yes, through a locked hook |
+| Permit dirty ordinary files | Yes, authority choice determines treatment | No | Yes, then stages and checkpoints them |
 | Fetch before ordinary ref mutation | Yes | Yes | Yes |
-| Publish local-ahead/local-only branches | Yes | No | Yes |
+| Publish local-ahead/local-only branches | Local-work path only; never remote adoption | No | Yes |
 | Apply remote-ahead/remote-only branches locally | Yes | Yes | Yes |
 | Target checkout | Remote default | Preserve current unless safely deleted | Preserve current unless safely deleted |
-| Operation plan written | Before shared reconciliation mutations | Before local mutations, even for no-op parity | Before shared reconciliation mutations, after optional checkpoint |
+| Operation plan written | Local work: after checkpoint; remote adoption: after verified backup/confirmed discard | Before local mutations, even for no-op parity | Before shared reconciliation mutations, after optional checkpoint |
 | Parent advisories returned | No | Yes | Yes on success |
-| Successful return contract | `InitializeRepositoryResult` | `GetFromRemoteResult` | `CommitAndSaveResult` with complete handoff |
-| Expected safe refusal contract | Throw | Throw | Often `CommitAndSaveResult` with do-not-resume handoff |
+| Successful return contract | `SetupResult` with `kind: "completed"` | `GetFromRemoteResult` | `CommitAndSaveResult` with complete handoff |
+| Expected safe refusal contract | Tagged result during execution; inspection can throw | Throw | Often `CommitAndSaveResult` with do-not-resume handoff |

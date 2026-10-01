@@ -9,7 +9,19 @@ export type DestructiveEffectKind =
   | "delete-remote-ref"
   | "rewrite-local-ref"
   | "rewrite-remote-ref"
+  | "replace-files"
   | "replace-checkout";
+
+export interface RemoteAdoption {
+  readonly remote: string;
+  readonly remoteDefaultBranch: string;
+  readonly fetchedTips: readonly { readonly name: string; readonly tip: string }[];
+  readonly worktreeFingerprint: string;
+  readonly trackedPaths: readonly string[];
+  readonly removedUntrackedPaths: readonly string[];
+  readonly preservedIgnoredPaths: readonly string[];
+  readonly backup: { readonly kind: "verified-copy"; readonly path: string } | { readonly kind: "explicit-discard" };
+}
 
 export interface CheckoutTransition {
   readonly before?: string;
@@ -51,6 +63,7 @@ export interface OperationPlan {
   readonly localRefUpdates: readonly GitRefUpdate[];
   readonly remoteRefUpdates: readonly GitRemoteRefUpdate[];
   readonly checkpoint?: Readonly<CheckpointTransition>;
+  readonly remoteAdoption?: Readonly<RemoteAdoption>;
   readonly configurationChanges: readonly Readonly<ConfigurationTransition>[];
   readonly checkout: Readonly<CheckoutTransition>;
   readonly destructiveEffects: readonly DestructiveEffect[];
@@ -63,6 +76,7 @@ export interface OperationPlanInput {
   readonly localRefUpdates?: readonly GitRefUpdate[];
   readonly remoteRefUpdates?: readonly GitRemoteRefUpdate[];
   readonly checkpoint?: CheckpointTransition;
+  readonly remoteAdoption?: RemoteAdoption;
   readonly configurationChanges?: readonly ConfigurationTransition[];
   readonly checkout?: CheckoutTransition;
   readonly destructiveEffects?: readonly DestructiveEffect[];
@@ -74,6 +88,8 @@ export type MutationBoundary =
   | "remote-fetch"
   | "checkout"
   | "configuration"
+  | "file-replacement"
+  | "remote-head"
   | "merge";
 export type TerminalOperationPhase = "completed" | "aborted" | "undone" | "recovered";
 export type OperationPhase = "planned" | `before-${MutationBoundary}` | `after-${MutationBoundary}` | TerminalOperationPhase;
@@ -145,6 +161,14 @@ export function createOperationPlan(input: OperationPlanInput): OperationPlan {
     localRefUpdates: immutableEntries(input.localRefUpdates),
     remoteRefUpdates: immutableEntries(input.remoteRefUpdates),
     ...(input.checkpoint ? { checkpoint: Object.freeze({ ...input.checkpoint }) } : {}),
+    ...(input.remoteAdoption ? { remoteAdoption: Object.freeze({
+      ...input.remoteAdoption,
+      fetchedTips: immutableEntries(input.remoteAdoption.fetchedTips),
+      trackedPaths: Object.freeze([...input.remoteAdoption.trackedPaths]),
+      removedUntrackedPaths: Object.freeze([...input.remoteAdoption.removedUntrackedPaths]),
+      preservedIgnoredPaths: Object.freeze([...input.remoteAdoption.preservedIgnoredPaths]),
+      backup: Object.freeze({ ...input.remoteAdoption.backup }),
+    }) } : {}),
     configurationChanges: Object.freeze((input.configurationChanges ?? []).map((change) => Object.freeze({
       key: change.key,
       before: Object.freeze([...change.before]),
@@ -173,6 +197,15 @@ export function localTransactionUpdates(plan: OperationPlan): readonly GitRefUpd
 
 export function renderOperationPreview(plan: OperationPlan): string {
   const lines = [`WipStream: ${plan.command}`, `Operation: ${plan.operationId}`];
+  if (plan.remoteAdoption) {
+    const adoption = plan.remoteAdoption;
+    lines.push(`Remote authority: ${adoption.remote}; all ordinary branches; checkout ${adoption.remoteDefaultBranch}`);
+    lines.push(adoption.backup.kind === "verified-copy" ? `Verified project backup: ${adoption.backup.path}` : "User explicitly approved replacement without a backup.");
+    lines.push(`Replace tracked files: ${adoption.trackedPaths.join(", ") || "none"}`);
+    lines.push(`Remove non-ignored untracked files: ${adoption.removedUntrackedPaths.join(", ") || "none"}`);
+    lines.push(`Preserve ignored entries: ${adoption.preservedIgnoredPaths.length}`);
+    lines.push("No push or content commit. Undo cannot restore discarded working files; use the ordinary backup folder.");
+  }
   if (plan.checkpoint) {
     lines.push(
       `Checkpoint: ${plan.checkpoint.branch} ${plan.checkpoint.before} → ${plan.checkpoint.after}`,
@@ -300,6 +333,7 @@ function normalizeOperationPlan(value: unknown): OperationPlan | undefined {
   if (!remoteRefUpdates) {
     return undefined;
   }
+  if (value.remoteAdoption !== undefined && !validRemoteAdoption(value.remoteAdoption)) return undefined;
   try {
     return createOperationPlan({
       operationId: value.operationId,
@@ -308,6 +342,7 @@ function normalizeOperationPlan(value: unknown): OperationPlan | undefined {
       localRefUpdates: value.localRefUpdates as unknown as readonly GitRefUpdate[],
       remoteRefUpdates,
       checkpoint: value.checkpoint as unknown as CheckpointTransition | undefined,
+      remoteAdoption: value.remoteAdoption as unknown as RemoteAdoption | undefined,
       configurationChanges: value.configurationChanges as unknown as readonly ConfigurationTransition[],
       checkout: value.checkout as unknown as CheckoutTransition,
       destructiveEffects: value.destructiveEffects as unknown as readonly DestructiveEffect[],
@@ -315,6 +350,15 @@ function normalizeOperationPlan(value: unknown): OperationPlan | undefined {
   } catch {
     return undefined;
   }
+}
+
+function validRemoteAdoption(value: unknown): value is RemoteAdoption {
+  if (!isObject(value) || typeof value.remote !== "string" || typeof value.remoteDefaultBranch !== "string"
+    || typeof value.worktreeFingerprint !== "string" || !Array.isArray(value.fetchedTips)
+    || !value.fetchedTips.every(tip => isObject(tip) && typeof tip.name === "string" && typeof tip.tip === "string")
+    || ![value.trackedPaths, value.removedUntrackedPaths, value.preservedIgnoredPaths].every(names => Array.isArray(names) && names.every(name => typeof name === "string"))
+    || !isObject(value.backup)) return false;
+  return value.backup.kind === "explicit-discard" || value.backup.kind === "verified-copy" && typeof value.backup.path === "string";
 }
 
 function normalizeOperationReceipt(value: unknown): OperationReceipt | undefined {
