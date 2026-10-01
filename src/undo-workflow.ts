@@ -109,6 +109,13 @@ export async function inspectUndoEligibility(repo: GitRepository): Promise<UndoE
   if ((await inspectIncompleteOperations(repo)).length) return { eligible: false, reason: "An operation is incomplete." };
   const receipt = await latestTerminalReceipt(repo);
   if (!receipt) return { eligible: false, reason: "There is no completed operation." };
+  if (receipt.plan.remoteAdoption) {
+    const backup = receipt.plan.remoteAdoption.backup;
+    return {
+      eligible: false, operationId: receipt.plan.operationId, command: receipt.plan.command,
+      reason: `Remote adoption cannot be undone: restoring refs cannot restore discarded uncommitted files.${backup.kind === "verified-copy" ? ` Recover selected work from the ordinary backup folder at ${backup.path}.` : " Replacement was explicitly approved without a backup."}`,
+    };
+  }
   if (receipt.status !== "completed" || !UNDOABLE.has(receipt.plan.command)) {
     return { eligible: false, reason: "The latest operation is not undoable." };
   }

@@ -11,7 +11,6 @@ import { WipStreamError } from "./errors";
 import {
     commitAndSave,
     getFromRemote,
-    initializeRepository,
 } from "./generalized-workflow";
 import {
     CondensePreview,
@@ -23,6 +22,7 @@ import { readRepositoryConfiguration } from "./repository-model";
 import { inspectUndoEligibility, undoLastAction } from "./undo-workflow";
 import { inspectIncompleteOperations, renderOperationPreview } from "./operations";
 import { recoverIncompleteOperation } from "./recovery-workflow";
+import { reportSetupRecovery, runRepositorySetup } from "./setup-ui";
 
 type CommandAction = (
     output: vscode.OutputChannel,
@@ -95,21 +95,11 @@ async function initializeCommand(
     networkSignal: AbortSignal
 ): Promise<void> {
     const repo = await cmd.selectRepository(networkSignal);
-    await cmd.saveRepositoryDocuments(repo);
-
     const configuration = await readRepositoryConfiguration(repo);
     const requestedRemote = configuration.kind === "uninitialized"
         ? await cmd.askValue("Git remote", "origin")
         : undefined;
-    const result = await initializeRepository(repo, requestedRemote);
-
-    cmd.showSuccess(
-        output,
-        "Initialize Repository",
-        `checkout=${result.checkout} published=${cmd.branchList(result.published)} created=${cmd.branchList(result.created)} fastForwarded=${cmd.branchList(result.fastForwarded)} deleted=${cmd.branchList(result.deleted)}`,
-        result.operationId,
-        `Repository initialized; “${result.checkout}” is checked out. Use Start Branch for new work, or select an existing work branch in your Git client.`
-    );
+    await runRepositorySetup(output, repo, requestedRemote, networkSignal);
 }
 
 async function resumeCommand(
@@ -297,18 +287,30 @@ async function recoverCommand(output: vscode.OutputChannel, networkSignal: Abort
     if (active || conflicts.length) {
         throw new WipStreamError("RECOVERY_BLOCKED", "Git still has an active operation or unresolved conflicts. Finish or abort it in your Git client; for a WipStream merge, use Continue Pending Merge or Abort Pending Merge. The current state is shown in WipStream Output.");
     }
+    const adoption = selected.plan.remoteAdoption;
+    const backupDetail = adoption
+        ? adoption.backup.kind === "verified-copy"
+            ? `\nVerified backup folder: ${adoption.backup.path}\nThe backup is retained; open it separately to recover selected work. Ref restoration cannot recover discarded uncommitted files.`
+            : "\nReplacement was explicitly approved without a backup. Ref restoration cannot recover discarded uncommitted files."
+        : "";
+    const nextStep = adoption ? "Rerun Initialize Repository to inspect current state and choose how to proceed." : "Run Commit and Save afterward.";
     const confirmed = await vscode.window.showWarningMessage(
         `Keep current state and close the interrupted ${selected.plan.command} attempt?`,
         {
             modal: true,
-            detail: `Operation: ${selected.plan.operationId}\nRecorded phase: ${selected.phase}\nCurrent branch: ${branch ?? "detached"}\nCurrent commit: ${head}\nGit has no active operation or unresolved conflicts.\n\nThis keeps your files, staged changes, commits, remote branches, and recovery history. It does not undo the old attempt or declare the remote synchronized. Run Commit and Save afterward.`,
+            detail: `Operation: ${selected.plan.operationId}\nRecorded phase: ${selected.phase}\nCurrent branch: ${branch ?? "detached"}\nCurrent commit: ${head}\nGit has no active operation or unresolved conflicts.${backupDetail}\n\nThis keeps your files, staged changes, commits, remote branches, and recovery history. It does not undo the old attempt or declare the remote synchronized. ${nextStep}`,
         },
         "Keep Current State"
     );
     if (confirmed !== "Keep Current State") return;
     const receipt = await recoverIncompleteOperation(repo, selected.plan.operationId);
+    if (adoption) {
+        await reportSetupRecovery(output, receipt.plan.operationId,
+            adoption.backup.kind === "verified-copy" ? adoption.backup.path : undefined);
+        return;
+    }
     cmd.showSuccess(output, "Recover Incomplete Operation", "preservedCurrentState=true", receipt.plan.operationId,
-        "Kept your current files and commits and closed the interrupted attempt. Run Commit and Save to synchronize; recover any other incomplete attempts first.");
+        `Kept your current files and commits and closed the interrupted attempt. ${nextStep} Recover any other incomplete attempts first.`);
 }
 
 async function undoCommand(

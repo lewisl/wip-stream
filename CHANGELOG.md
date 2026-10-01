@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.8
+
+- Initialize now supports dirty or copied projects with explicit remote,
+  local-work, and external-reconciliation choices across all ordinary branches.
+- Added verified complete project backups and recorded remote adoption that
+  never pushes, merges, or creates a content commit.
+- Added stale-preview checks, backup-aware interruption recovery, and remote
+  adoption's explicit exclusion from ref-only Undo.
+- Removed duplicate Cancel buttons from setup confirmations and stopped
+  terminal setup notifications from keeping command progress running. Optional
+  backup-folder actions remain available after command completion.
+- Added major-functionality regression tests and a preserved realistic usage
+  sandbox; manual Extension Development Host checks remain separately tracked.
+
 ## 0.2.7
 
 - Document the Git command sequence for occasional work outside VS Code,
