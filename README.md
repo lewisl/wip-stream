@@ -13,15 +13,68 @@ WipStream does not prohibit committing directly on `main`.
 1. Install the WipStream `.vsix` using **Extensions: Install from VSIX...** in
    VS Code. Reload the window if prompted. WipStream is not on the Marketplace.
 2. Open a normal, complete Git clone with a configured remote, usually `origin`.
-3. With a clean working directory, run **WipStream: Initialize Repository** once
-   in each clone. Initialize synchronizes safe branch advances in both directions
-   and checks out the remote default branch.
+3. Run **WipStream: Initialize Repository** in each clone. Local changes and
+   existing commits are allowed; choose which work to keep as described below.
+   Successful setup checks out the remote default branch.
 4. Use **Start Branch** for new work, or select an existing work branch using
    VS Code's Git branch picker, Fork, or Git itself.
 
-The remote must identify a default branch, support atomic pushes, and allow
-branch creation, updates, and deletion. Separate ordinary clones are supported;
-linked Git worktrees and shallow clones are not.
+The remote must identify a default branch. Publishing through WipStream also
+requires atomic pushes and permission to create, update, and delete branches.
+Separate ordinary clones are supported; linked Git worktrees and shallow clones
+are not.
+
+### Choose the authoritative work
+
+Initialize inspects actual files and all ordinary branches, even if a copied
+project already carries WipStream configuration. A clean matching clone can
+finish setup without extra decisions. Otherwise choose:
+
+- **Use the remote’s version.** Every ordinary local branch will match the
+  selected remote: missing branches are created and local-only branches removed.
+  Tracked files are replaced; non-ignored untracked files are removed. Ignored
+  files are preserved, and collisions with remote files block replacement.
+  This path never pushes, merges, or creates a content commit.
+- **Commit this machine’s work and save to remote.** Save editor documents,
+  checkpoint non-ignored changes, and synchronize safe advances across all
+  ordinary branches, including existing local commits and local-only branches.
+  Commit hooks are honored. If history diverges, the checkpoint stays locally
+  and nothing is published.
+- **Resolve differences locally, then save to remote.** Keep current work and
+  reconcile the named branches in your Git tool. Incorporate remote history;
+  matching file contents alone is not enough. Rerun Initialize and choose
+  **Commit this machine’s work and save to remote**. An externally completed
+  merge is reused rather than recreated.
+
+For remote authority, choose **Copy project, then use remote**, explicitly
+confirm **Use remote without a backup**, or cancel. The folder picker starts at
+the project's parent. Choose a parent outside the project; WipStream creates a
+new timestamped folder there, never overwriting another folder. It copies and
+verifies the entire self-contained project, including `.git`, ignored and
+untracked files, permissions, and symbolic links. External Git storage and
+special files that cannot be safely copied are refused. Remote replacement
+currently refuses submodule checkouts; use your Git tool and the local-work path
+for those projects.
+
+The full backup path is displayed with **Open Backup Folder**. A backup is an
+ordinary folder you can inspect separately. Copy desired changes back, then
+**Commit and Save**; on another computer, **Get from Remote**. WipStream never
+automatically restores, publishes, or deletes the backup. Remote adoption is
+not eligible for **Undo Last Action**: restoring refs cannot restore discarded
+uncommitted files.
+
+Cancel is available throughout setup. Saving editor documents or changing
+files, refs, configuration, or buffers after inspection requires an updated
+preview and a fresh choice. A local checkpoint is not proof of successful
+remote saving; wait for completion before continuing on another computer.
+
+### Move away from folder synchronization
+
+Each computer needs an independent ordinary clone. Stop the previous folder
+sync service from modifying those project folders before using WipStream;
+do not synchronize their `.git` directories. Initialize can adopt a copied
+project's actual state, but it cannot make concurrent folder synchronization
+safe. Configuring or disabling the external sync service is your responsibility.
 
 ## Start a new task
 
@@ -190,6 +243,8 @@ If a command cannot run, its message explains the blocking condition. Open
 | Git has no active operation but WipStream still reports an incomplete attempt | Run Recover Incomplete Operation, inspect the recorded and current state, and choose Keep Current State if that is the state you want to retain. Then Commit and Save. |
 | Git has an unrelated rebase, cherry-pick, or other active operation | Finish or abort it in your Git client first. WipStream will not treat it as its recorded merge. |
 | Publication fails or is cancelled | Keep working in the current clone. Address the reported cause; use recovery if an incomplete attempt blocks retry, then Commit and Save again. |
+| Initialize reports divergent history | Keep the local checkpoint, reconcile the named branches in your Git tool, then rerun Initialize and choose this machine's work. |
+| Remote adoption stops after replacement begins | Keep the displayed backup. Use Recover Incomplete Operation to inspect and keep current state, then rerun Initialize for a fresh choice. Undo cannot restore replaced uncommitted files. |
 
 Continue stages the resolved files and commits the merge, then runs Commit and
 Save. Review the resulting file contents before continuing. Abort verifies the
@@ -202,6 +257,11 @@ attempt and refuses to run while Git has an active operation or unresolved
 index conflicts. It does not publish, undo the attempt, or certify synchronization.
 If several attempts are incomplete, inspect and resolve each one.
 
+For interrupted remote adoption, recovery displays the backup location and
+offers **Open Backup Folder** afterward. Keeping current state does not restore
+that backup. Retry through Initialize, including when replacement stopped with
+a detached checkout; do not edit operation receipts or refs manually.
+
 Automatic recognition is conservative. Older receipts record a target branch
 name instead of its exact commit; if that history no longer establishes the
 outcome, explicit recovery is required. Do not delete receipt files manually.
@@ -210,7 +270,7 @@ outcome, explicit recovery is required. Do not delete receipt files manually.
 
 | Command | Purpose | Shortcut |
 | --- | --- | --- |
-| Initialize Repository | Set up and synchronize a clone | `Ctrl+W`, then `I` |
+| Initialize Repository | Choose authoritative work and set up a clone | `Ctrl+W`, then `I` |
 | Get from Remote | Retrieve all branches before resuming here | `Ctrl+W`, then `G` |
 | Commit and Save | Checkpoint work and synchronize all branches | `Ctrl+W`, then `S` |
 | Start Branch | Begin a task from the current branch | Command Palette |
@@ -247,13 +307,19 @@ background commit, merge, fetch, push, recovery, or branch mutation.
 npm install
 npm test
 npm run package
-code --install-extension dist/lewisl.wipstream-0.2.7.vsix --force
 ```
 
-Alternatively, install the packaged file with **Extensions: Install from
-VSIX...**. Install the same version on each computer used for the workflow.
+Packaging does not install or publish anything. When ready, install the packaged
+file with **Extensions: Install from VSIX...**, or explicitly run
+`code --install-extension dist/lewisl.wipstream-0.2.8.vsix --force`. Install the
+same version on each computer used for the workflow.
 
 `npm test` uses disposable local remotes and ordinary clones without contacting
-a network service. `npm run test:live` creates an isolated two-clone fixture and
-VS Code profile for manual testing. Tests and development must not create linked
-Git worktrees.
+a network service. `npm run test:setup-usage -- --bootstrap` preserves realistic
+ordinary clones for workflow exercises and Extension Development Host testing,
+without installing an extension. See [setup usage testing](docs/setup-usage-testing.md).
+The older `npm run test:live` helper creates a two-clone fixture and VS Code
+profile **and installs the VSIX into that profile**; use it only when installation
+is intended. Disposable temporary worktrees are permitted for development
+guard tests only. Day-to-day extension use still requires exactly one ordinary
+worktree per clone.

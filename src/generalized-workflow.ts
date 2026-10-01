@@ -93,7 +93,7 @@ export interface CommitAndSaveResult {
   readonly reconcileBranch?: string;
 }
 
-interface AppliedReconciliationResult {
+export interface AppliedReconciliationResult {
   readonly operationId: string;
   readonly checkout: string;
   readonly published: readonly string[];
@@ -102,7 +102,7 @@ interface AppliedReconciliationResult {
   readonly deleted: readonly string[];
 }
 
-interface ApplyReconciliationOptions {
+export interface ApplyReconciliationOptions {
   readonly command: string;
   readonly remote: string;
   readonly currentBranch: string;
@@ -110,7 +110,9 @@ interface ApplyReconciliationOptions {
   readonly fetchedRemoteTips: ReadonlyMap<string, string>;
   readonly inventory: readonly BranchInventoryEntry[];
   readonly checkpoint?: CheckpointTransition;
-  readonly hooks?: Pick<CommitAndSaveHooks, "beforeRemotePush" | "afterRemotePush">;
+  readonly hooks?: Pick<CommitAndSaveHooks, "beforeRemotePush" | "afterRemotePush"> & {
+    readonly beforeLocalMutation?: () => Promise<void>;
+  };
   readonly configurationChanges?: readonly ConfigurationTransition[];
 }
 
@@ -231,7 +233,7 @@ async function snapshotLocalTips(repo: GitRepository): Promise<ReadonlyMap<strin
   return new Map((await repo.listRefs(prefix)).map((ref) => [ref.name.slice(prefix.length), ref.objectId]));
 }
 
-async function trackingConfigurationChanges(
+export async function trackingConfigurationChanges(
   repo: GitRepository,
   remote: string,
   branches: readonly string[]
@@ -249,6 +251,18 @@ async function trackingConfigurationChanges(
     }
   }
   return changes;
+}
+
+export async function initializationConfigurationChanges(
+  repo: GitRepository,
+  remote: string,
+  branches: readonly string[]
+): Promise<readonly ConfigurationTransition[]> {
+  return [
+    { key: `remote.${remote}.fetch`, before: await repo.getConfigValues(`remote.${remote}.fetch`), after: [`+refs/heads/*:refs/remotes/${remote}/*`] },
+    ...await trackingConfigurationChanges(repo, remote, branches),
+    { key: CONFIG_KEYS.remote, before: await repo.getConfigValues(CONFIG_KEYS.remote), after: [remote] },
+  ];
 }
 
 async function requireUnchangedInitializeCheckout(
@@ -438,6 +452,7 @@ async function executeReconciliationPlan(
     ));
     await verifyPublishedRemoteTrackingTips(repo, options, reconciliation);
   }
+  await hooks.beforeLocalMutation?.();
   if (currentRefWillChange) {
     await withMutationBoundary(repo, operationPlan.operationId, "checkout", () => repo.detach());
   }
@@ -460,7 +475,7 @@ async function applyReconciliationConfiguration(repo: GitRepository, plan: Opera
   });
 }
 
-async function applyBidirectionalReconciliation(
+export async function applyBidirectionalReconciliation(
   repo: GitRepository,
   options: ApplyReconciliationOptions
 ): Promise<AppliedReconciliationResult> {
@@ -470,7 +485,19 @@ async function applyBidirectionalReconciliation(
   await verifyReconciliationInputs(repo, options, reconciliation);
   await executeReconciliationPlan(repo, options, reconciliation);
   await verifyBranchParity(repo, options.remote, options.command);
+  if (await repo.currentBranch() !== options.targetCheckout || (await repo.statusPorcelain()).trim()) {
+    return fail("RECONCILIATION_VERIFICATION_FAILED", `${options.command} did not finish with a clean checkout on “${options.targetCheckout}”. Inspect the incomplete operation before retrying.`);
+  }
   await applyReconciliationConfiguration(repo, operationPlan);
+  await verifyBranchParity(repo, options.remote, options.command);
+  if (await repo.currentBranch() !== options.targetCheckout || (await repo.statusPorcelain()).trim()) {
+    return fail("RECONCILIATION_VERIFICATION_FAILED", `${options.command} did not finish with a clean checkout on “${options.targetCheckout}”. Inspect the incomplete operation before retrying.`);
+  }
+  for (const change of operationPlan.configurationChanges) {
+    if (JSON.stringify(await repo.getConfigValues(change.key)) !== JSON.stringify(change.after)) {
+      return fail("CONFIGURATION_VERIFICATION_FAILED", `${options.command} could not verify configuration “${change.key}”. Inspect the incomplete operation before retrying.`);
+    }
+  }
   await completeOperation(repo, operationPlan.operationId);
   return { operationId: operationPlan.operationId, ...reconciliation.effects };
 }
@@ -560,6 +587,47 @@ async function initializeRepositoryUnlocked(
   });
 }
 
+export interface CheckpointHooks {
+  readonly requestCheckpointMessage?: CommitAndSaveHooks["requestCheckpointMessage"];
+  readonly onCheckpoint?: (checkpoint: CheckpointTransition) => void;
+}
+
+/** Caller holds the command lock and has checked repository safety. */
+export async function createCheckpoint(
+  repo: GitRepository,
+  currentBranch: string,
+  hooks: CheckpointHooks = {}
+): Promise<CheckpointTransition | undefined> {
+  const beforeCheckpoint = await repo.hash(repo.localRef(currentBranch));
+  await repo.stageAll();
+  let checkpoint: CheckpointTransition | undefined;
+  if (await repo.hasStagedChanges()) {
+    const suggestedMessage = defaultCheckpointMessage();
+    const requestedMessage = hooks.requestCheckpointMessage
+      ? await hooks.requestCheckpointMessage(suggestedMessage)
+      : suggestedMessage;
+    const message = requestedMessage?.trim();
+    if (!message) {
+      return fail("INVALID_CHECKPOINT_MESSAGE", "Checkpoint commit messages cannot be blank.");
+    }
+    await repo.commit(message);
+    checkpoint = {
+      branch: currentBranch,
+      before: beforeCheckpoint,
+      after: await repo.hash(repo.localRef(currentBranch)),
+      message,
+    };
+    hooks.onCheckpoint?.(checkpoint);
+  }
+  if ((await repo.statusPorcelain()).trim()) {
+    return fail(
+      "WORKTREE_CHANGED_DURING_CHECKPOINT",
+      "The working tree changed while creating the checkpoint. The checkpoint is retained locally; inspect the remaining files before retrying."
+    );
+  }
+  return checkpoint;
+}
+
 export async function commitAndSave(
   repo: GitRepository,
   hooks: CommitAndSaveHooks = {}
@@ -588,33 +656,8 @@ async function commitAndSaveUnlocked(
     return fail("DETACHED_HEAD", "Check out an ordinary branch before Commit and Save.");
   }
 
-  const beforeCheckpoint = await repo.hash(repo.localRef(currentBranch));
-  await repo.stageAll();
-  const checkpointCreated = await repo.hasStagedChanges();
-  let checkpoint: CheckpointTransition | undefined;
-  if (checkpointCreated) {
-    const suggestedMessage = defaultCheckpointMessage();
-    const requestedMessage = hooks.requestCheckpointMessage
-      ? await hooks.requestCheckpointMessage(suggestedMessage)
-      : suggestedMessage;
-    const message = requestedMessage?.trim();
-    if (!message) {
-      return fail("INVALID_CHECKPOINT_MESSAGE", "Checkpoint commit messages cannot be blank.");
-    }
-    await repo.commit(message);
-    checkpoint = {
-      branch: currentBranch,
-      before: beforeCheckpoint,
-      after: await repo.hash(repo.localRef(currentBranch)),
-      message,
-    };
-  }
-  if ((await repo.statusPorcelain()).trim()) {
-    return fail(
-      "WORKTREE_CHANGED_DURING_CHECKPOINT",
-      "The working tree changed while creating the checkpoint. The checkpoint is retained locally; inspect the remaining files before retrying."
-    );
-  }
+  const checkpoint = await createCheckpoint(repo, currentBranch, hooks);
+  const checkpointCreated = Boolean(checkpoint);
 
   const unsuccessful = (
     failure: CommitAndSaveFailure,

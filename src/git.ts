@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import { existsSync } from "fs";
+import { lstat, realpath, rmdir, unlink } from "fs/promises";
 import * as path from "path";
 import { WipStreamError } from "./errors";
 
@@ -230,12 +231,16 @@ export class GitRepository {
   }
 
   public async run(args: readonly string[]): Promise<string> {
+    return (await this.runRaw(args)).trim();
+  }
+
+  public async runRaw(args: readonly string[]): Promise<string> {
     const result = await execute(this.root, args);
     if (result.exitCode !== 0) {
       const output = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
       throw new GitError(args, output || `git ${args.join(" ")} failed.`, result.exitCode);
     }
-    return result.stdout.trim();
+    return result.stdout;
   }
 
   public async tryRun(args: readonly string[]): Promise<GitResult> {
@@ -514,6 +519,87 @@ export class GitRepository {
       remote,
       `+refs/heads/*:refs/remotes/${remote}/*`,
     ]);
+  }
+
+  public async readRemoteDefaultBranch(remote: string): Promise<string> {
+    const output = await this.runNetwork(["ls-remote", "--symref", remote, "HEAD"]);
+    const branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(output)?.[1];
+    if (!branch) {
+      throw new WipStreamError("REMOTE_HEAD_MISSING", `Remote “${remote}” does not identify an ordinary default branch.`);
+    }
+    return branch;
+  }
+
+  public async setRemoteTrackingDefaultBranch(remote: string, branch: string): Promise<void> {
+    await this.mutate(["remote", "set-head", remote, branch]);
+  }
+
+  public async trackedPaths(): Promise<readonly string[]> {
+    return (await this.runRaw(["ls-files", "--cached", "-z"])).split("\0").filter(Boolean);
+  }
+
+  public async treePaths(commit: string): Promise<readonly { readonly name: string; readonly mode: string }[]> {
+    const output = await this.runRaw(["ls-tree", "-r", "-z", "--full-tree", commit]);
+    return output.split("\0").filter(Boolean).map(entry => {
+      const separator = entry.indexOf("\t");
+      return { name: entry.slice(separator + 1), mode: entry.slice(0, entry.indexOf(" ")) };
+    });
+  }
+
+  public async ignoredPaths(names: readonly string[]): Promise<readonly string[]> {
+    if (!names.length) return [];
+    const args = ["check-ignore", "--no-index", "--stdin", "-z"];
+    const result = await execute(this.root, args, { input: `${names.join("\0")}\0` });
+    if (result.exitCode !== 0 && result.exitCode !== 1) throw new GitError(args, result.stderr.trim(), result.exitCode);
+    return result.stdout.split("\0").filter(Boolean);
+  }
+
+  public async branchConfigurationKeys(branch: string): Promise<readonly string[]> {
+    const escaped = branch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const args = ["config", "--local", "--name-only", "--null", "--get-regexp", `^branch\\.${escaped}\\.[^.]+$`];
+    const result = await this.tryRun(args);
+    if (result.exitCode !== 0 && result.exitCode !== 1) throw new GitError(args, result.stderr.trim(), result.exitCode);
+    return [...new Set(result.stdout.split("\0").filter(Boolean))].sort();
+  }
+
+  /** Remove exactly the approved untracked entries, never recursively. */
+  public async removeWorkingFiles(names: readonly string[], directories: readonly string[]): Promise<void> {
+    await this.assertSingleWorktree();
+    const projectRoot = await realpath(this.root);
+    const filename = (name: string): string => {
+      const resolved = path.resolve(this.root, name);
+      const relative = path.relative(this.root, resolved);
+      if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new WipStreamError("INVALID_REPLACEMENT_PATH", `Invalid approved replacement path: ${name}.`);
+      }
+      return resolved;
+    };
+    const requireProjectParent = async (target: string, name: string): Promise<void> => {
+      const parent = await realpath(path.dirname(target));
+      const relativeParent = path.relative(projectRoot, parent);
+      if (relativeParent === ".." || relativeParent.startsWith(`..${path.sep}`) || path.isAbsolute(relativeParent)) {
+        throw new WipStreamError("REPLACEMENT_PATH_CHANGED", `An approved entry's parent now points outside the project: ${name}.`);
+      }
+    };
+    for (const name of names) {
+      const target = filename(name);
+      await requireProjectParent(target, name);
+      if ((await lstat(target)).isDirectory()) throw new WipStreamError("REPLACEMENT_PATH_CHANGED", `Approved file became a directory: ${name}.`);
+      await unlink(target);
+    }
+    for (const name of [...directories].sort((left, right) => right.split("/").length - left.split("/").length)) {
+      try {
+        const target = filename(name);
+        await requireProjectParent(target, name);
+        await rmdir(target);
+      } catch (error) {
+        if (!["ENOTEMPTY", "EEXIST", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      }
+    }
+  }
+
+  public async replaceWorkingFiles(commit: string): Promise<void> {
+    await this.mutate(["switch", "--detach", "--discard-changes", commit]);
   }
 
   public async createBranch(branch: string, startPoint: string): Promise<void> {

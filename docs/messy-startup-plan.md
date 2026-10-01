@@ -123,8 +123,13 @@ Document the migration away from folder synchronization: each machine needs an i
 
 Acceptance: users can adopt the remote, publish this machine’s work, or reconcile externally and return—without deleting the clone or losing unapproved local work.
 
-## Plan storage and implementation timing
+## Plan storage and implementation status
 
-This finalized plan is saved as `docs/messy-startup-plan.md` for resumption in a later session. Implementation has not started and remains subject to repository approval requirements.
+This plan is implemented in the step-by-step approved batches recorded in
+[messy-startup-todo.md](messy-startup-todo.md), including the added realistic
+usage-test bootstrap after Step 3. Major functionality has regression tests.
 
-The user explicitly deferred implementation until tomorrow. Saving this plan does not authorize starting implementation in this session.
+Disposable worktrees are permitted for development testing only; the extension's
+day-to-day single-worktree restriction remains. Packaging never authorizes
+installation or publication. Manual Extension Development Host verification
+is tracked separately from automated workflow and dialog tests.

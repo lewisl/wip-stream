@@ -21,6 +21,7 @@ import {
 } from "./repository-model";
 import { inspectIncompleteOperations } from "./operations";
 import { inspectUndoEligibility } from "./undo-workflow";
+import type { SetupEditorState } from "./setup-workflow";
 
 const CONTEXT_KEYS = [
     "wipstream.initialized",
@@ -93,6 +94,18 @@ function repositoryDocuments(repo: GitRepository): vscode.TextDocument[] {
     return vscode.workspace.textDocuments.filter(
         (document) => document.uri.scheme === "file" && isWithin(repo.root, document.uri.fsPath)
     );
+}
+
+export function readRepositoryEditorState(repo: GitRepository): SetupEditorState {
+    const documents = repositoryDocuments(repo).map(document => ({
+        path: document.uri.fsPath,
+        version: document.version,
+        dirty: document.isDirty,
+    })).sort((left, right) => left.path.localeCompare(right.path));
+    return {
+        signature: JSON.stringify(documents),
+        dirty: documents.some(document => document.dirty),
+    };
 }
 
 export async function saveRepositoryDocuments(repo: GitRepository): Promise<void> {
