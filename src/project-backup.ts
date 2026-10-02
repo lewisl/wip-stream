@@ -6,6 +6,7 @@ import { fail, WipStreamError } from "./errors";
 import { GitRepository } from "./git";
 import { ProjectEntry, snapshotProject } from "./project-snapshot";
 import { commandLockPath, withRepositoryCommandLock } from "./repository-safety";
+import { isWithin } from "./paths";
 
 export interface ProjectBackupHooks {
   readonly signal?: AbortSignal;
@@ -25,11 +26,6 @@ export class ProjectBackupError extends WipStreamError {
     super(code, message);
     this.name = "ProjectBackupError";
   }
-}
-
-function isWithin(parent: string, candidate: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return relative === "" || !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
 function requireNotCancelled(signal?: AbortSignal): void {

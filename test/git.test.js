@@ -28,6 +28,10 @@ if (args[0] === "rev-parse") {
 } else if (args[0] === "exit-seven") {
   process.stderr.write("seven\\n");
   process.exitCode = 7;
+} else if (args[0] === "split-unicode") {
+  const bytes = Buffer.from("λ🙂  ");
+  process.stdout.write(bytes.subarray(0, 1));
+  setTimeout(() => process.stdout.write(bytes.subarray(1)), 10);
 } else if (args[0] === "terminate") {
   process.kill(process.pid, "SIGTERM");
 } else if (args[0] === "fetch") {
@@ -42,6 +46,7 @@ if (args[0] === "rev-parse") {
   try {
     const repo = await GitRepository.open(fixture);
     assert.equal(await repo.run(["probe-stdin"]), "eof", "ordinary Git commands receive closed stdin");
+    assert.equal(await repo.runRaw(["split-unicode"]), "λ🙂  ", "raw output preserves split UTF-8 and trailing spaces");
 
     await repo.updateRefs([{
       ref: "refs/heads/topic",

@@ -1,9 +1,10 @@
 import { fail } from "./errors";
 import { GitRepository } from "./git";
 import { OperationReceipt, recordOperationRecovery } from "./operations";
-import { withRepositoryCommandLock } from "./repository-safety";
+import { recoverStaleCommandLock, withRepositoryCommandLock } from "./repository-safety";
 
 export async function recoverIncompleteOperation(repo: GitRepository, operationId: string): Promise<OperationReceipt> {
+  await recoverStaleCommandLock(repo);
   return withRepositoryCommandLock(repo, "Recover Incomplete Operation", async () => {
     await repo.assertSingleWorktree();
     if (await repo.operationInProgress()) {

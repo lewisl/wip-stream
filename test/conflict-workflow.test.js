@@ -1,8 +1,8 @@
 const assert = require("assert/strict");
-const { execFileSync } = require("child_process");
-const { mkdtempSync, rmSync, writeFileSync } = require("fs");
-const os = require("os");
+const { writeFileSync } = require("fs");
 const path = require("path");
+const { git, commitFile, withFixture: sharedFixture } = require("./setup-fixture");
+const { repositoryState } = require("./fixture-state");
 
 const { GitRepository } = require("../out/git");
 const { GeneralizedWorkflowError, commitAndSave, initializeRepository } = require("../out/generalized-workflow");
@@ -16,54 +16,14 @@ const {
 } = require("../out/conflict-workflow");
 const { readOperationReceipt } = require("../out/operations");
 
-function git(cwd, args) {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
-
-function configureIdentity(directory) {
-  git(directory, ["config", "user.name", "WipStream Conflict Test"]);
-  git(directory, ["config", "user.email", "wipstream-conflict@example.invalid"]);
-}
-
-function fixture(prefix) {
-  const root = mkdtempSync(path.join(os.tmpdir(), prefix));
-  const remote = path.join(root, "remote.git");
-  const seed = path.join(root, "seed");
-  git(root, ["init", "--bare", remote]);
-  git(root, ["init", seed]);
-  configureIdentity(seed);
-  writeFileSync(path.join(seed, "shared.txt"), "baseline\n");
-  git(seed, ["add", "shared.txt"]);
-  git(seed, ["commit", "-m", "Baseline"]);
-  git(seed, ["branch", "-M", "main"]);
-  git(seed, ["remote", "add", "origin", remote]);
-  git(seed, ["push", "-u", "origin", "main"]);
-  git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
-  return { root, remote };
-}
-
 async function withFixture(prefix, action) {
-  const value = fixture(prefix);
-  try {
-    await action(value);
-  } finally {
-    rmSync(value.root, { recursive: true, force: true });
-  }
+  return sharedFixture(action, { prefix, initialFile: "shared.txt" });
 }
 
 async function clone(value, name, initialize = false) {
-  const directory = path.join(value.root, name);
-  git(value.root, ["clone", value.remote, directory]);
-  configureIdentity(directory);
-  const repo = await GitRepository.open(directory);
+  const { directory, repo } = await value.clone(name);
   if (initialize) await initializeRepository(repo);
   return { directory, repo };
-}
-
-function commitFile(directory, name, text, message) {
-  writeFileSync(path.join(directory, name), text);
-  git(directory, ["add", "--all"]);
-  git(directory, ["commit", "-m", message]);
 }
 
 async function expectConflictError(action, code) {
@@ -173,6 +133,55 @@ async function runConflictedUpdateContinue() {
   });
 }
 
+async function runConflictedReconcileContinue() {
+  await withFixture("wipstream-reconcile-continue-", async value => {
+    const { first, second } = await createDivergence(value, true);
+    const localTip = await first.repo.hash("main");
+    const remoteTip = await second.repo.hash("main");
+    const pending = await reconcileWithRemote(first.repo);
+    assert.equal(pending.pending, true);
+    assert.deepEqual(await first.repo.conflictPaths(), ["shared.txt"]);
+    await expectConflictError(() => continuePendingMerge(first.repo), "UNRESOLVED_CONFLICTS");
+    writeFileSync(path.join(first.directory, "shared.txt"), "resolved both sides\n");
+    git(first.directory, ["add", "shared.txt"]);
+    assert.deepEqual(await first.repo.conflictPaths(), []);
+    assert.equal(await first.repo.operationInProgress(), true, "Continue handles an active merge, rather than an external commit");
+    const result = await continuePendingMerge(first.repo);
+    assert.equal(result.operationId, pending.operationId);
+    assert.equal(result.command, "Reconcile with Remote");
+    assert.equal(result.save.published, true);
+    assert.equal(await first.repo.operationInProgress(), false);
+    assert.equal(await inspectPendingMerge(first.repo), undefined);
+    const parents = git(first.directory, ["rev-list", "--parents", "-n", "1", "main"]).split(" ").slice(1);
+    assert.deepEqual(new Set(parents), new Set([localTip, remoteTip]));
+    assert.equal(git(value.remote, ["show", "main:shared.txt"]), "resolved both sides");
+    assert.equal((await readOperationReceipt(first.repo, pending.operationId)).status, "completed");
+  });
+}
+
+async function runContinueCheckoutChanged() {
+  await withFixture("wipstream-continue-checkout-", async value => {
+    const { first } = await createDivergence(value, true);
+    const pending = await reconcileWithRemote(first.repo);
+    writeFileSync(path.join(first.directory, "shared.txt"), "resolved\n");
+    git(first.directory, ["add", "shared.txt"]);
+    assert.deepEqual(await first.repo.conflictPaths(), []);
+    assert.equal(await first.repo.operationInProgress(), true);
+    const before = await repositoryState(first.repo, value.remote);
+    const currentBranch = first.repo.currentBranch.bind(first.repo);
+    // Git blocks ordinary switching during a merge. Simulate a changed
+    // checkout reported by the repository adapter at Continue's guard.
+    first.repo.currentBranch = async () => "another-branch";
+    try {
+      await expectConflictError(() => continuePendingMerge(first.repo), "CHECKOUT_CHANGED");
+    } finally {
+      first.repo.currentBranch = currentBranch;
+    }
+    assert.deepEqual(await repositoryState(first.repo, value.remote), before);
+    assert.equal((await readOperationReceipt(first.repo, pending.operationId)).status, "in-progress");
+  });
+}
+
 async function runAbortVerificationFailure() {
   await withFixture("wipstream-abort-verification-", async (value) => {
     const { first } = await createDivergence(value, true);
@@ -195,6 +204,8 @@ Promise.resolve()
   .then(runCleanReconcile)
   .then(runConflictedReconcileAbortAndRestart)
   .then(runConflictedUpdateContinue)
+  .then(runConflictedReconcileContinue)
+  .then(runContinueCheckoutChanged)
   .then(runAbortVerificationFailure)
   .then(() => console.log("WipStream guided conflict workflow tests passed."))
   .catch((error) => {

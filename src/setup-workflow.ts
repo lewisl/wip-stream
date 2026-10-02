@@ -1,5 +1,3 @@
-import * as path from "path";
-import { readFile } from "fs/promises";
 import { createHash } from "crypto";
 import { fail, WipStreamError } from "./errors";
 import { GitRepository } from "./git";
@@ -9,14 +7,15 @@ import {
   readRepositoryConfiguration,
   snapshotRemoteTrackingTips,
 } from "./repository-model";
-import { requireRepositoryPreflight, withRepositoryCommandLock } from "./repository-safety";
-import { snapshotProject } from "./project-snapshot";
+import { requireRepositoryPreflight, withRepositoryWorkflow } from "./repository-safety";
+import { snapshotWorkingFiles } from "./project-snapshot";
 import {
   AppliedReconciliationResult,
   applyBidirectionalReconciliation,
   CommitAndSaveHooks,
   createCheckpoint,
   initializationConfigurationChanges,
+  initializationRemoteHead,
 } from "./generalized-workflow";
 import { CheckpointTransition, inspectIncompleteOperations, listOperationReceipts } from "./operations";
 import { backupProjectUnlocked, ProjectBackupError } from "./project-backup";
@@ -77,13 +76,7 @@ function requireNotCancelled(hooks: SetupInspectionHooks): void {
 export async function inspectSetupLocalState(repo: GitRepository, hooks: SetupInspectionHooks = {}): Promise<SetupLocalState> {
   requireNotCancelled(hooks);
   const editors = hooks.readEditorState?.() ?? { signature: "", dirty: false };
-  const indexPath = path.resolve(repo.root, await repo.run(["rev-parse", "--git-path", "index"]));
-  let index = "absent";
-  try {
-    index = createHash("sha256").update(await readFile(indexPath)).digest("hex");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
+  const index = createHash("sha256").update(JSON.stringify(await repo.indexEntries())).digest("hex");
   const state: SetupLocalState = {
     checkout: await repo.currentBranch(),
     head: await repo.hash("HEAD"),
@@ -91,10 +84,10 @@ export async function inspectSetupLocalState(repo: GitRepository, hooks: SetupIn
       name: ref.name.slice("refs/heads/".length), tip: ref.objectId,
     }))),
     // Avoid Git's optional index refresh: inspection must not change staged state.
-    status: await repo.run(["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"]),
-    files: (await snapshotProject(repo.root, [".git"], hooks.signal)).fingerprint,
+    status: await repo.runRaw(["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"]),
+    files: (await snapshotWorkingFiles(repo, hooks.signal)).fingerprint,
     index,
-    configuration: await repo.run(["config", "--local", "--null", "--list"]),
+    configuration: await repo.runRaw(["config", "--local", "--null", "--list"]),
     editors: Object.freeze({ ...editors }),
   };
   if (JSON.stringify(editors) !== JSON.stringify(hooks.readEditorState?.() ?? editors)) {
@@ -140,6 +133,13 @@ export async function inspectRepositorySetupUnlocked(
       && !receipt.recovery.branch && receipt.recovery.head === local.head);
     if (!keptAdoption) return fail("DETACHED_HEAD", "Check out an ordinary branch before Initialize Repository. For interrupted remote adoption, first run Recover Incomplete Operation and keep the current state.");
   }
+  const branchesDiffer = branches.some(branch => !["equal", "remote-only"].includes(branch.relation));
+  const requiresChoice = !local.checkout || Boolean(local.status) || local.editors.dirty || branchesDiffer;
+  const reconciliationBranches = branches.filter(branch => {
+    if (branch.relation === "diverged") return true;
+    return branch.relation === "remotely-deleted" && Boolean(branch.localTip)
+      && branch.localTip !== branch.previousRemoteTip;
+  }).map(branch => branch.name);
   return Object.freeze({
     repositoryRoot: repo.root,
     remote,
@@ -147,9 +147,8 @@ export async function inspectRepositorySetupUnlocked(
     remoteTips: Object.freeze([...remoteTips].map(([name, tip]) => Object.freeze({ name, tip }))),
     branches: Object.freeze(branches.map(branch => Object.freeze({ ...branch }))),
     local,
-    requiresChoice: Boolean(!local.checkout || local.status || local.editors.dirty || branches.some(branch => !["equal", "remote-only"].includes(branch.relation))),
-    reconciliationBranches: Object.freeze(branches.filter(branch => branch.relation === "diverged"
-      || (branch.relation === "remotely-deleted" && branch.localTip && branch.localTip !== branch.previousRemoteTip)).map(branch => branch.name)),
+    requiresChoice,
+    reconciliationBranches: Object.freeze(reconciliationBranches),
   });
 }
 
@@ -158,7 +157,7 @@ export async function inspectRepositorySetup(
   requestedRemote?: string,
   hooks: SetupInspectionHooks = {}
 ): Promise<SetupInspection> {
-  return withRepositoryCommandLock(repo, "Inspect Repository Setup", () => inspectRepositorySetupUnlocked(repo, requestedRemote, hooks));
+  return withRepositoryWorkflow(repo, "Inspect Repository Setup", () => inspectRepositorySetupUnlocked(repo, requestedRemote, hooks));
 }
 
 async function requireApprovedSetupState(repo: GitRepository, inspection: SetupInspection, hooks: SetupInspectionHooks): Promise<void> {
@@ -183,9 +182,21 @@ export async function executeRepositorySetup(
   choice: SetupChoice,
   hooks: SetupExecutionHooks = {}
 ): Promise<SetupResult> {
-  if (choice.kind === "cancel") return { kind: "cancelled", checkpointCreated: false, published: false, message: "Setup cancelled; local work was not saved or published by this attempt." };
+  if (choice.kind === "cancel") {
+    return {
+      kind: "cancelled",
+      checkpointCreated: false,
+      published: false,
+      message: "Setup cancelled; local work was not saved or published by this attempt.",
+    };
+  }
   if (choice.kind === "remote" && choice.backup.kind === "discard" && choice.backup.confirmed !== true) {
-    return { kind: "failed", checkpointCreated: false, published: false, message: "Explicit confirmation is required to replace local work without a backup. No files were saved or replaced, and nothing was published." };
+    return {
+      kind: "failed",
+      checkpointCreated: false,
+      published: false,
+      message: "Explicit confirmation is required to replace local work without a backup. No files were saved or replaced, and nothing was published.",
+    };
   }
   if (choice.kind === "reconcile") {
     let branches = inspection.reconciliationBranches;
@@ -198,17 +209,23 @@ export async function executeRepositorySetup(
       branches, message: setupReconciliationMessage(branches, false),
     };
   }
-  return withRepositoryCommandLock(repo, "Initialize Repository", async () => {
+  return withRepositoryWorkflow(repo, "Initialize Repository", async () => {
     let checkpoint: CheckpointTransition | undefined;
     let backupPath: string | undefined;
+    let operationId: string | undefined;
     try {
       await requireRepositoryPreflight(repo, { command: "Initialize Repository", cleanWorktree: false, cleanSubmodules: true });
       await requireApprovedSetupState(repo, inspection, hooks);
       await hooks.saveDocuments?.();
       // Saving can change both disk contents and editor dirty/version state.
       // The old approval no longer describes those files, so return for preview.
-      if (!statesEqual(inspection.local, await inspectSetupLocalState(repo, hooks))) {
-        return { kind: "preview-required", checkpointCreated: false, published: false, message: "Setup state changed while saving editor documents. Review the updated setup preview before committing or replacing files." };
+      if (hooks.saveDocuments && !statesEqual(inspection.local, await inspectSetupLocalState(repo, hooks))) {
+        return {
+          kind: "preview-required",
+          checkpointCreated: false,
+          published: false,
+          message: "Setup state changed while saving editor documents. Review the updated setup preview before committing or replacing files.",
+        };
       }
       requireNotCancelled(hooks);
       if (choice.kind === "remote") {
@@ -217,10 +234,23 @@ export async function executeRepositorySetup(
         } else if (choice.backup.confirmed !== true) {
           return fail("REMOTE_DISCARD_NOT_CONFIRMED", "Explicit confirmation is required to replace local work without a backup.");
         }
-        const adopted = await adoptRemoteUnlocked(repo, inspection,
-          backupPath ? { kind: "verified-copy", path: backupPath } : { kind: "explicit-discard" },
-          () => requireApprovedSetupState(repo, inspection, hooks), hooks.signal);
-        return { kind: "completed", ...adopted, checkpointCreated: false, published: false, publishedBranches: [], backupPath };
+        const backup = backupPath ? { kind: "verified-copy" as const, path: backupPath } : { kind: "explicit-discard" as const };
+        const adopted = await adoptRemoteUnlocked(
+          repo,
+          inspection,
+          backup,
+          () => requireApprovedSetupState(repo, inspection, hooks),
+          hooks.signal,
+          id => { operationId = id; }
+        );
+        return {
+          kind: "completed",
+          ...adopted,
+          checkpointCreated: false,
+          published: false,
+          publishedBranches: [],
+          backupPath,
+        };
       }
       const currentBranch = inspection.local.checkout;
       if (!currentBranch) return fail("DETACHED_HEAD", "Check out an ordinary branch before saving this machine's work.");
@@ -244,8 +274,11 @@ export async function executeRepositorySetup(
       }
       await repo.fetchAllBranches(inspection.remote);
       const inventory = await inspectBranchInventory(repo, inspection.remote, previousTips);
-      const affected = inventory.filter(branch => branch.relation === "diverged"
-        || (branch.relation === "remotely-deleted" && branch.localTip && branch.localTip !== branch.previousRemoteTip)).map(branch => branch.name);
+      const affected = inventory.filter(branch => {
+        if (branch.relation === "diverged") return true;
+        return branch.relation === "remotely-deleted" && Boolean(branch.localTip)
+          && branch.localTip !== branch.previousRemoteTip;
+      }).map(branch => branch.name);
       if (affected.length) return {
         kind: "reconciliation-required", checkpointCreated: Boolean(checkpoint), published: false,
         branches: affected, message: setupReconciliationMessage(affected, Boolean(checkpoint)),
@@ -260,9 +293,7 @@ export async function executeRepositorySetup(
         ...inventory.filter(branch => branch.relation === "local-only").map(branch => branch.name),
       ])].sort();
       const configurationChanges = await initializationConfigurationChanges(repo, inspection.remote, synchronizedBranches);
-      if (!statesEqual(afterCheckpoint, await inspectSetupLocalState(repo, hooks))) {
-        return fail("SETUP_STATE_CHANGED", "Local work changed after the checkpoint. It remains locally; review a fresh setup preview before publication.");
-      }
+      const remoteHead = await initializationRemoteHead(repo, inspection.remote, remoteDefaultBranch);
       requireNotCancelled(hooks);
       const requireUnchangedCheckpointState = async (): Promise<void> => {
         requireNotCancelled(hooks);
@@ -271,9 +302,17 @@ export async function executeRepositorySetup(
         }
       };
       const applied = await applyBidirectionalReconciliation(repo, {
-        command: "Initialize Repository", remote: inspection.remote, currentBranch,
-        targetCheckout: remoteDefaultBranch, fetchedRemoteTips, inventory, checkpoint, configurationChanges,
+        command: "Initialize Repository",
+        remote: inspection.remote,
+        currentBranch,
+        targetCheckout: remoteDefaultBranch,
+        fetchedRemoteTips,
+        inventory,
+        checkpoint,
+        configurationChanges,
+        remoteHead,
         hooks: {
+          onOperationStarted: id => { operationId = id; },
           beforeRemotePush: async () => {
             await hooks.beforeRemotePush?.();
             await requireUnchangedCheckpointState();
@@ -286,21 +325,41 @@ export async function executeRepositorySetup(
       return { kind: "completed", ...effects, checkpointCreated: Boolean(checkpoint), published: true, publishedBranches };
     } catch (error) {
       if (error instanceof ProjectBackupError) backupPath = error.backupPath;
-      const incomplete = (await inspectIncompleteOperations(repo))[0];
+      const incomplete = (await inspectIncompleteOperations(repo)).find(receipt => receipt.plan.operationId === operationId);
       const message = error instanceof Error ? error.message : String(error);
       const saved = checkpoint ? "The checkpoint is saved locally. " : "Local files and existing commits are retained. ";
+      const backupMessage = backupPath ? ` Backup retained at ${backupPath}.` : "";
+      const failureMessage = choice.kind === "remote" ? "Remote adoption did not complete. " : `${saved}Remote saving did not complete. `;
       if (incomplete) return {
         kind: "failed", operationId: incomplete.plan.operationId, backupPath,
         checkpointCreated: Boolean(checkpoint), published: false,
-        message: `${choice.kind === "remote" ? "Remote adoption did not complete. " : `${saved}Remote saving did not complete. `}Recorded phase: ${incomplete.phase}. ${message}${backupPath ? ` Backup retained at ${backupPath}.` : ""} Run Recover Incomplete Operation before retrying Initialize. Do not resume this work from the remote on another machine.`,
+        message: `${failureMessage}Recorded phase: ${incomplete.phase}. ${message}${backupMessage} Run Recover Incomplete Operation before retrying Initialize. Do not resume this work from the remote on another machine.`,
       };
       if (error instanceof WipStreamError && error.code === "SETUP_STATE_CHANGED") {
-        return { kind: "preview-required", checkpointCreated: Boolean(checkpoint), published: false, backupPath, message: `${saved}${message}${backupPath ? ` Backup retained at ${backupPath}.` : ""}` };
+        return {
+          kind: "preview-required",
+          checkpointCreated: Boolean(checkpoint),
+          published: false,
+          backupPath,
+          message: `${saved}${message}${backupMessage}`,
+        };
       }
       if (hooks.signal?.aborted || error instanceof WipStreamError && error.code === "CANCELLED") {
-        return { kind: "cancelled", checkpointCreated: Boolean(checkpoint), published: false, backupPath, message: `${saved}Setup was cancelled; nothing was published.${backupPath ? ` Backup retained at ${backupPath}.` : ""}` };
+        return {
+          kind: "cancelled",
+          checkpointCreated: Boolean(checkpoint),
+          published: false,
+          backupPath,
+          message: `${saved}Setup was cancelled; nothing was published.${backupMessage}`,
+        };
       }
-      return { kind: "failed", checkpointCreated: Boolean(checkpoint), published: false, backupPath, message: `${saved}Nothing was published. ${message}${backupPath ? ` Backup retained at ${backupPath}.` : ""}` };
+      return {
+        kind: "failed",
+        checkpointCreated: Boolean(checkpoint),
+        published: false,
+        backupPath,
+        message: `${saved}Nothing was published. ${message}${backupMessage}`,
+      };
     }
   });
 }

@@ -1,9 +1,11 @@
 import { fail } from "./errors";
+import { CONFIG_KEYS } from "./constants";
 import { GitRefUpdate, GitRepository } from "./git";
-import { initializationConfigurationChanges } from "./generalized-workflow";
+import { initializationConfigurationChanges, initializationRemoteHead } from "./generalized-workflow";
 import {
   applyLocalRefTransaction,
-  beginOperation,
+  applyRemoteHeadTransition,
+  withRecordedOperation,
   completeOperation,
   createOperationPlan,
   RemoteAdoption,
@@ -32,7 +34,8 @@ export async function adoptRemoteUnlocked(
   inspection: SetupInspection,
   backup: RemoteAdoption["backup"],
   revalidate: () => Promise<void>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onOperationStarted?: (operationId: string) => void
 ): Promise<RemoteAdoptionResult> {
   const remoteTips = new Map(inspection.remoteTips.map(({ name, tip }) => [name, tip]));
   const localTips = new Map(inspection.local.branches.map(({ name, tip }) => [name, tip]));
@@ -45,8 +48,13 @@ export async function adoptRemoteUnlocked(
   }
   const worktree = await snapshotProject(repo.root, [".git"], signal);
   const trackedPaths = new Set([...await repo.trackedPaths(), ...currentTree.map(entry => entry.name)]);
+  const trackedDirectories = new Set<string>();
+  for (const name of trackedPaths) {
+    const parts = name.split("/");
+    for (let depth = 1; depth < parts.length; depth += 1) trackedDirectories.add(parts.slice(0, depth).join("/"));
+  }
   const untracked = worktree.entries.filter(entry => entry.name && !trackedPaths.has(entry.name)
-    && (entry.kind !== "directory" || ![...trackedPaths].some(name => name.startsWith(`${entry.name}/`))));
+    && (entry.kind !== "directory" || !trackedDirectories.has(entry.name)));
   const ignored = new Set(await repo.ignoredPaths(untracked.map(entry => entry.name)));
   const protectedEntries = worktree.entries.filter(entry => ignored.has(entry.name));
   const caseInsensitive = await repo.getConfig("core.ignorecase") === "true";
@@ -63,9 +71,10 @@ export async function adoptRemoteUnlocked(
     ref: repo.localRef(name), expectedOld: localTips.get(name) ?? null, proposed: remoteTips.get(name) ?? null,
   }));
   const deleted = names.filter(name => localTips.has(name) && !remoteTips.has(name));
-  const configuration = [...await initializationConfigurationChanges(repo, inspection.remote, [...remoteTips.keys()])];
+  const initialization = await initializationConfigurationChanges(repo, inspection.remote, [...remoteTips.keys()]);
+  const configuration = initialization.filter(change => change.key !== CONFIG_KEYS.remote);
   // Preserve unrelated configuration, including similarly prefixed branch names.
-  const marker = configuration.pop();
+  const marker = initialization.find(change => change.key === CONFIG_KEYS.remote);
   for (const branch of deleted) {
     for (const key of await repo.branchConfigurationKeys(branch)) {
       configuration.push({ key, before: await repo.getConfigValues(key), after: [] });
@@ -77,9 +86,10 @@ export async function adoptRemoteUnlocked(
     localRefUpdates: updates,
     checkout: { before: inspection.local.checkout, after: inspection.remoteDefaultBranch },
     configurationChanges: configuration,
+    remoteHead: await initializationRemoteHead(repo, inspection.remote, inspection.remoteDefaultBranch),
     remoteAdoption: {
       remote: inspection.remote, remoteDefaultBranch: inspection.remoteDefaultBranch,
-      fetchedTips: inspection.remoteTips, worktreeFingerprint: inspection.local.files,
+      fetchedTips: inspection.remoteTips, worktreeFingerprint: worktree.fingerprint,
       trackedPaths: [...new Set([...trackedPaths, ...targetTree.map(entry => entry.name)])].sort(),
       removedUntrackedPaths: [...removedFiles, ...removedDirectories],
       preservedIgnoredPaths: [...ignored].sort(), backup,
@@ -93,51 +103,58 @@ export async function adoptRemoteUnlocked(
     ],
   });
   await revalidate();
-  if (worktree.fingerprint !== inspection.local.files) return fail("SETUP_STATE_CHANGED", "Working files changed while preparing remote adoption. Review a new setup preview.");
-  await beginOperation(repo, plan);
-  await revalidate();
-  await withMutationBoundary(repo, plan.operationId, "file-replacement", async () => {
-    await repo.removeWorkingFiles(removedFiles, removedDirectories);
-    await repo.replaceWorkingFiles(defaultTip);
-  });
-  await applyLocalRefTransaction(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(inspection.remoteDefaultBranch));
-  await withMutationBoundary(repo, plan.operationId, "remote-fetch", () => repo.fetchAllBranches(inspection.remote));
-  const fetched = [...await snapshotRemoteTrackingTips(repo, inspection.remote)].map(([name, tip]) => ({ name, tip }));
-  if (JSON.stringify(fetched) !== JSON.stringify(inspection.remoteTips)
-    || await repo.readRemoteDefaultBranch(inspection.remote) !== inspection.remoteDefaultBranch) {
-    return fail("REMOTE_CHANGED_DURING_ADOPTION", "The remote changed during replacement. Keep the backup and inspect the incomplete operation before a fresh setup attempt.");
+  if ((await snapshotProject(repo.root, [".git"], signal)).fingerprint !== worktree.fingerprint) {
+    return fail("SETUP_STATE_CHANGED", "Project files changed while preparing remote adoption. Review a new setup preview.");
   }
-  const actualHeads = (await repo.listRefs("refs/heads/")).map(ref => ({ name: ref.name.slice("refs/heads/".length), tip: ref.objectId }));
-  if (JSON.stringify(actualHeads) !== JSON.stringify(inspection.remoteTips)
-    || await repo.currentBranch() !== inspection.remoteDefaultBranch
-    || (await repo.statusPorcelain()).trim()) {
-    return fail("REMOTE_ADOPTION_VERIFICATION_FAILED", "Replacement did not finish with all-branch parity and a clean default checkout. Keep the backup and inspect the incomplete operation.");
-  }
-  await repo.run(["diff", "--exit-code", "HEAD", "--"]);
-  const after = await snapshotProject(repo.root, [".git"], signal);
-  const preserved = after.entries.filter(entry => ignored.has(entry.name));
-  if (JSON.stringify(protectedEntries) !== JSON.stringify(preserved)) {
-    return fail("IGNORED_FILES_CHANGED", "Ignored files or their permissions changed during replacement. The operation is incomplete; use the backup for recovery.");
-  }
-  await withMutationBoundary(repo, plan.operationId, "remote-head", () => repo.setRemoteTrackingDefaultBranch(inspection.remote, inspection.remoteDefaultBranch));
-  await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
-    for (const change of configuration) await repo.replaceConfigValues(change.key, change.after);
-  });
-  for (const change of configuration) {
-    if (JSON.stringify(await repo.getConfigValues(change.key)) !== JSON.stringify(change.after)) {
-      return fail("CONFIGURATION_VERIFICATION_FAILED", `Remote replacement could not verify configuration ${change.key}. Inspect the incomplete operation.`);
+  return withRecordedOperation(repo, plan, async () => {
+    onOperationStarted?.(plan.operationId);
+    await revalidate();
+    await withMutationBoundary(repo, plan.operationId, "file-replacement", async () => {
+      if ((await snapshotProject(repo.root, [".git"], signal)).fingerprint !== worktree.fingerprint) {
+        return fail("SETUP_STATE_CHANGED", "Project files changed before remote replacement. Inspect the incomplete operation before retrying.");
+      }
+      await repo.removeWorkingFiles(removedFiles, removedDirectories);
+      await repo.replaceWorkingFiles(defaultTip);
+    });
+    await applyLocalRefTransaction(repo, plan);
+    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(inspection.remoteDefaultBranch));
+    await withMutationBoundary(repo, plan.operationId, "remote-fetch", () => repo.fetchAllBranches(inspection.remote));
+    const fetched = [...await snapshotRemoteTrackingTips(repo, inspection.remote)].map(([name, tip]) => ({ name, tip }));
+    if (JSON.stringify(fetched) !== JSON.stringify(inspection.remoteTips)
+      || await repo.readRemoteDefaultBranch(inspection.remote) !== inspection.remoteDefaultBranch) {
+      return fail("REMOTE_CHANGED_DURING_ADOPTION", "The remote changed during replacement. Keep the backup and inspect the incomplete operation before a fresh setup attempt.");
     }
-  }
-  if (await repo.currentBranch() !== inspection.remoteDefaultBranch || (await repo.statusPorcelain()).trim()) {
-    return fail("REMOTE_ADOPTION_VERIFICATION_FAILED", "The checkout changed while finishing configuration. Inspect the incomplete operation before retrying.");
-  }
-  await completeOperation(repo, plan.operationId);
-  return {
-    operationId: plan.operationId, checkout: inspection.remoteDefaultBranch,
-    created: names.filter(name => !localTips.has(name) && remoteTips.has(name)),
-    fastForwarded: inspection.branches.filter(branch => branch.relation === "remote-ahead").map(branch => branch.name),
-    replaced: names.filter(name => localTips.has(name) && remoteTips.has(name) && localTips.get(name) !== remoteTips.get(name)),
-    deleted,
-  };
+    const actualHeads = (await repo.listRefs("refs/heads/")).map(ref => ({ name: ref.name.slice("refs/heads/".length), tip: ref.objectId }));
+    if (JSON.stringify(actualHeads) !== JSON.stringify(inspection.remoteTips)
+      || await repo.currentBranch() !== inspection.remoteDefaultBranch
+      || (await repo.statusPorcelain()).trim()) {
+      return fail("REMOTE_ADOPTION_VERIFICATION_FAILED", "Replacement did not finish with all-branch parity and a clean default checkout. Keep the backup and inspect the incomplete operation.");
+    }
+    await repo.run(["diff", "--exit-code", "HEAD", "--"]);
+    const after = await snapshotProject(repo.root, [".git"], signal);
+    const preserved = after.entries.filter(entry => ignored.has(entry.name));
+    if (JSON.stringify(protectedEntries) !== JSON.stringify(preserved)) {
+      return fail("IGNORED_FILES_CHANGED", "Ignored files or their permissions changed during replacement. The operation is incomplete; use the backup for recovery.");
+    }
+    await applyRemoteHeadTransition(repo, plan);
+    await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
+      for (const change of configuration) await repo.replaceConfigValues(change.key, change.after);
+    });
+    for (const change of configuration) {
+      if (JSON.stringify(await repo.getConfigValues(change.key)) !== JSON.stringify(change.after)) {
+        return fail("CONFIGURATION_VERIFICATION_FAILED", `Remote replacement could not verify configuration ${change.key}. Inspect the incomplete operation.`);
+      }
+    }
+    if (await repo.currentBranch() !== inspection.remoteDefaultBranch || (await repo.statusPorcelain()).trim()) {
+      return fail("REMOTE_ADOPTION_VERIFICATION_FAILED", "The checkout changed while finishing configuration. Inspect the incomplete operation before retrying.");
+    }
+    await completeOperation(repo, plan.operationId);
+    return {
+      operationId: plan.operationId, checkout: inspection.remoteDefaultBranch,
+      created: names.filter(name => !localTips.has(name) && remoteTips.has(name)),
+      fastForwarded: inspection.branches.filter(branch => branch.relation === "remote-ahead").map(branch => branch.name),
+      replaced: names.filter(name => localTips.has(name) && remoteTips.has(name) && localTips.get(name) !== remoteTips.get(name)),
+      deleted,
+    };
+  });
 }

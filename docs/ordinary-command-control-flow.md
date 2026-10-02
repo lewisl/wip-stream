@@ -42,7 +42,7 @@ VS Code command handler(): Promise<void>
 
 `selectRepository()` discovers repositories from the active file and workspace folders. It returns the only `GitRepository`, prompts and returns the selected one when several exist, or throws a `WipStreamError` when none exists or selection is cancelled. When supplied, the signal is attached only to that repository instance's fetch and push subprocesses.
 
-Each workflow entry point wraps its unlocked implementation in `withRepositoryCommandLock()`. The lock helper returns the unlocked implementation's result unchanged and releases the repository-local lock in `finally`, including when the workflow throws.
+Ordinary workflow entry points use `withRepositoryWorkflow()`, which acquires the command lock and explicitly recognizes externally completed merges before running the command. `withRepositoryCommandLock()` itself only locks, calls the action, and releases the lock in `finally`. Read-only preflight validation does not update receipts.
 
 ### Error versus result
 
@@ -98,8 +98,8 @@ The sequence is:
 
 1. `buildReconciliationPlan()` converts the inventory into exact local ref updates and unified remote transitions shaped as `{ ref, expected, proposed }`. It also calculates the branch-name arrays returned as `published`, `created`, `fastForwarded`, and `deleted`.
 2. `createOperationPlan()` returns an immutable schema-2 `OperationPlan` containing the command, local and remote transitions, checkout transition, configuration changes, optional checkpoint, and destructive effects. There is no parallel remote-lease array; schema-1 plans are validated and normalized when their receipts are read.
-3. `beginOperation()` writes and returns a planned `OperationReceipt`. From this point onward, a stopped operation can be discovered by `inspectIncompleteOperations()`.
-4. Verify that remote-tracking refs, the checkout, local branch tips, and the worktree still match the state that was classified. A mismatch throws and leaves the receipt incomplete for inspection.
+3. `withRecordedOperation()` writes the planned receipt through `beginOperation()` and runs the remaining steps with that exact operation ID. If the operation stops before entering any mutation boundary, it closes only its own receipt as aborted. Checkpoints created earlier remain retained locally. Once a boundary has been entered, a stopped operation remains discoverable through `inspectIncompleteOperations()`.
+4. Verify that remote-tracking refs, the checkout, local branch tips, and the worktree still match the state that was classified. A mismatch throws; the receipt closes automatically if no mutation boundary has been entered.
 5. For a new checkpoint, create a recovery ref for the pre-checkpoint tip inside a journaled `local-refs` mutation boundary.
 6. If local branches must be published, call `pushRefsAtomic()` inside a `remote-push` boundary. It issues one atomic push with one exact `--force-with-lease` per ref and returns `void`. Fetch again inside a `remote-fetch` boundary, verify the expected remote tips, and recheck local state.
 7. If the checked-out local ref will move, detach `HEAD` inside a `checkout` boundary. `applyLocalRefTransaction()` then creates recovery refs for displaced tips and applies every local create, update, and delete in one expected-old `git update-ref --stdin` transaction; it returns `void`.
@@ -139,18 +139,24 @@ folder-picker, or discard dialog does not execute the workflow.
 
 An uninitialized repository gets a trimmed remote string. An initialized clone
 uses its configured remote but is still fully inspected, including copied
-initialization markers. The command ID and shortcut are unchanged.
+initialization markers. The command ID is unchanged. Default keyboard chords are removed; users can assign shortcuts through VS Code's Keyboard Shortcuts editor.
 
 ### Inspection and approval
 
-1. `inspectRepositorySetup()` acquires and releases the inspection command lock.
+1. `inspectRepositorySetup()` runs the repository workflow driver, which acquires
+   the inspection command lock and explicitly recognizes resolved external merges
+   before read-only preflight validation.
    Preflight permits dirty ordinary files but refuses unsupported layouts,
    active Git operations, conflicts, and incomplete WipStream operations.
 2. Snapshot remote-tracking tips, fetch all branches, and read the server's
    actual default branch. Classify every branch, including remote deletions.
 3. Record the checkout, HEAD, all ordinary local tips, status without optional
-   index refresh, raw-index hash, full working-file fingerprint including
-   ignored files, local configuration, and editor path/version/dirty signature.
+   index refresh, a semantic index signature (entries and relevant flags), a
+   fingerprint of tracked and non-ignored untracked working files, local
+   configuration, and editor path/version/dirty signature. Stat-cache refreshes
+   and ignored build output do not invalidate local-work approval. Backup and
+   remote replacement independently snapshot the complete preservation scope,
+   including ignored files, before replacing anything.
 4. Present the three authority choices plus Cancel when work differs. A clean
    matching clone finishes configuration without an unnecessary decision.
 5. Remote authority adds backup/discard/cancel dialogs. A backup folder picker

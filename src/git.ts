@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import { lstat, realpath, rmdir, unlink } from "fs/promises";
+import { lstat, readlink, realpath, rmdir, unlink } from "fs/promises";
 import * as path from "path";
 import { WipStreamError } from "./errors";
 
@@ -131,12 +131,13 @@ export class GitError extends WipStreamError {
 
 interface GitResult {
   readonly stdout: string;
+  readonly stdoutBytes: Buffer;
   readonly stderr: string;
   readonly exitCode: number;
 }
 
 interface GitExecutionOptions {
-  readonly input?: string;
+  readonly input?: string | Buffer;
   readonly signal?: AbortSignal;
 }
 
@@ -149,7 +150,7 @@ function execute(cwd: string, args: readonly string[], options: GitExecutionOpti
       signal,
       stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
-    let stdout = "";
+    const stdoutChunks: Buffer[] = [];
     let stderr = "";
     let settled = false;
     let cancellationRequested = false;
@@ -161,8 +162,10 @@ function execute(cwd: string, args: readonly string[], options: GitExecutionOpti
       }
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    // Keep patches as bytes; decode text only after all chunks have arrived.
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    child.stderr?.on("data", (chunk: string) => (stderr += chunk));
     child.on("error", (error) => {
       const cancelled = signal?.aborted || error.name === "AbortError";
       if (cancelled) {
@@ -200,7 +203,8 @@ function execute(cwd: string, args: readonly string[], options: GitExecutionOpti
         return;
       }
       settled = true;
-      resolve({ stdout, stderr, exitCode });
+      const stdoutBytes = Buffer.concat(stdoutChunks);
+      resolve({ stdout: stdoutBytes.toString("utf8"), stdoutBytes, stderr, exitCode });
     });
     if (input !== undefined) {
       child.stdin?.end(input);
@@ -234,35 +238,34 @@ export class GitRepository {
     return (await this.runRaw(args)).trim();
   }
 
+  public async createBlob(contents: string): Promise<string> {
+    await this.assertSingleWorktree();
+    return this.runWithInput(["hash-object", "-w", "--stdin"], contents);
+  }
+
   public async runRaw(args: readonly string[]): Promise<string> {
-    const result = await execute(this.root, args);
+    return (await this.executeChecked(args)).stdout;
+  }
+
+  private async executeChecked(args: readonly string[], options: GitExecutionOptions = {}): Promise<GitResult> {
+    const result = await execute(this.root, args, options);
     if (result.exitCode !== 0) {
       const output = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
       throw new GitError(args, output || `git ${args.join(" ")} failed.`, result.exitCode);
     }
-    return result.stdout;
+    return result;
   }
 
   public async tryRun(args: readonly string[]): Promise<GitResult> {
     return execute(this.root, args);
   }
 
-  private async runWithInput(args: readonly string[], input: string): Promise<string> {
-    const result = await execute(this.root, args, { input });
-    if (result.exitCode !== 0) {
-      const output = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
-      throw new GitError(args, output || `git ${args.join(" ")} failed.`, result.exitCode);
-    }
-    return result.stdout.trim();
+  private async runWithInput(args: readonly string[], input: string | Buffer): Promise<string> {
+    return (await this.executeChecked(args, { input })).stdout.trim();
   }
 
   private async runNetwork(args: readonly string[]): Promise<string> {
-    const result = await execute(this.root, args, { signal: this.networkSignal });
-    if (result.exitCode !== 0) {
-      const output = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
-      throw new GitError(args, output || `git ${args.join(" ")} failed.`, result.exitCode);
-    }
-    return result.stdout.trim();
+    return (await this.executeChecked(args, { signal: this.networkSignal })).stdout.trim();
   }
 
   private async mutate(args: readonly string[]): Promise<string> {
@@ -275,7 +278,7 @@ export class GitRepository {
     return this.tryRun(args);
   }
 
-  private async mutateWithInput(args: readonly string[], input: string): Promise<string> {
+  private async mutateWithInput(args: readonly string[], input: string | Buffer): Promise<string> {
     await this.assertSingleWorktree();
     return this.runWithInput(args, input);
   }
@@ -303,8 +306,12 @@ export class GitRepository {
   }
 
   public async getConfigValues(key: string): Promise<readonly string[]> {
-    const result = await this.tryRun(["config", "--local", "--get-all", key]);
-    return result.exitCode === 0 ? result.stdout.trim().split("\n").filter(Boolean) : [];
+    const result = await this.tryRun(["config", "--local", "--null", "--get-all", key]);
+    if (result.exitCode === 1) return [];
+    if (result.exitCode !== 0) throw new GitError(["config", "--get-all", key], result.stderr.trim(), result.exitCode);
+    const values = result.stdout.split("\0");
+    if (values[values.length - 1] === "") values.pop();
+    return values;
   }
 
   public async setConfig(key: string, value: string): Promise<void> {
@@ -412,6 +419,14 @@ export class GitRepository {
     return result.exitCode === 0;
   }
 
+  /** Resolve any Git object; branch helpers intentionally require commits. */
+  public async objectId(ref: string): Promise<string | undefined> {
+    const result = await this.tryRun(["rev-parse", "--verify", "--quiet", `${ref}^{object}`]);
+    if (result.exitCode === 0) return result.stdout.trim();
+    if (result.exitCode === 1) return undefined;
+    throw new GitError(["rev-parse", "--verify", ref], result.stderr.trim(), result.exitCode);
+  }
+
   public async branchExists(branch: string): Promise<boolean> {
     return this.refExists(this.localRef(branch));
   }
@@ -457,7 +472,7 @@ export class GitRepository {
   }
 
   public async statusPorcelain(): Promise<string> {
-    return this.run(["status", "--porcelain=v1"]);
+    return this.runRaw(["--no-optional-locks", "status", "--porcelain=v1"]);
   }
 
   public async hasDirtySubmodules(): Promise<boolean> {
@@ -534,15 +549,62 @@ export class GitRepository {
     await this.mutate(["remote", "set-head", remote, branch]);
   }
 
+  public async replaceRemoteTrackingHead(remote: string, before: string | null, after: string | null): Promise<void> {
+    const ref = `refs/remotes/${remote}/HEAD`;
+    if ((await this.tryRun(["check-ref-format", ref])).exitCode !== 0
+      || (after !== null && (!after.startsWith(`refs/remotes/${remote}/`)
+        || after === ref || (await this.tryRun(["check-ref-format", after])).exitCode !== 0))) {
+      throw new WipStreamError("INVALID_REMOTE_HEAD", "The recorded remote default ref is invalid.");
+    }
+    const current = await this.symbolicRef(ref) ?? null;
+    if (current !== before || (current === null && await this.objectId(ref))) {
+      throw new WipStreamError("REMOTE_HEAD_CHANGED", "The remote default ref changed after it was inspected.");
+    }
+    if (before === null && after === null) return;
+    if (after === null) await this.mutate(["symbolic-ref", "--delete", ref]);
+    else await this.setRemoteTrackingDefaultBranch(remote, after.slice(`refs/remotes/${remote}/`.length));
+  }
+
   public async trackedPaths(): Promise<readonly string[]> {
     return (await this.runRaw(["ls-files", "--cached", "-z"])).split("\0").filter(Boolean);
   }
 
-  public async treePaths(commit: string): Promise<readonly { readonly name: string; readonly mode: string }[]> {
+  public async workingFileNames(): Promise<readonly string[]> {
+    const output = await this.runRaw(["ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
+    return [...new Set(output.split("\0").filter(Boolean))].sort();
+  }
+
+  public async indexEntries(): Promise<readonly { readonly entry: string; readonly flags: number }[]> {
+    const output = await this.runRaw(["ls-files", "--stage", "-v", "--debug", "-z"]);
+    const entries: { entry: string; flags: number }[] = [];
+    let cursor = 0;
+    while (cursor < output.length) {
+      const separator = output.indexOf("\0", cursor);
+      if (separator < 0) throw new WipStreamError("INDEX_INSPECTION_FAILED", "Git returned an incomplete index entry.");
+      const entry = output.slice(cursor, separator);
+      cursor = separator + 1;
+      const debugStart = cursor;
+      // Git emits five stat-cache lines after each NUL-terminated entry.
+      for (let line = 0; line < 5; line += 1) {
+        const end = output.indexOf("\n", cursor);
+        if (end < 0) throw new WipStreamError("INDEX_INSPECTION_FAILED", "Git returned incomplete index flags.");
+        cursor = end + 1;
+      }
+      const flags = /\tflags: ([0-9a-f]+)\n$/i.exec(output.slice(debugStart, cursor))?.[1];
+      if (flags === undefined) throw new WipStreamError("INDEX_INSPECTION_FAILED", "Git returned unrecognized index flags.");
+      // Keep assume-unchanged, intent-to-add, and skip-worktree; discard cache-validity bits.
+      const semanticFlags = Number.parseInt(flags, 16) & 0x60008000;
+      entries.push({ entry, flags: semanticFlags });
+    }
+    return entries;
+  }
+
+  public async treePaths(commit: string): Promise<readonly { readonly name: string; readonly mode: string; readonly objectId: string }[]> {
     const output = await this.runRaw(["ls-tree", "-r", "-z", "--full-tree", commit]);
     return output.split("\0").filter(Boolean).map(entry => {
       const separator = entry.indexOf("\t");
-      return { name: entry.slice(separator + 1), mode: entry.slice(0, entry.indexOf(" ")) };
+      const [mode, , objectId] = entry.slice(0, separator).split(" ");
+      return { name: entry.slice(separator + 1), mode, objectId };
     });
   }
 
@@ -602,37 +664,6 @@ export class GitRepository {
     await this.mutate(["switch", "--detach", "--discard-changes", commit]);
   }
 
-  public async createBranch(branch: string, startPoint: string): Promise<void> {
-    await this.mutate(["branch", branch, startPoint]);
-  }
-
-  public async createTrackingBranch(branch: string, remoteRef: string): Promise<void> {
-    await this.mutate(["branch", "--track", branch, remoteRef]);
-  }
-
-  public async setUpstream(branch: string, remoteRef: string): Promise<void> {
-    await this.mutate(["branch", "--set-upstream-to", remoteRef, branch]);
-  }
-
-  public async configureTracking(branch: string, remote: string): Promise<void> {
-    await this.mutate(["config", "--local", `branch.${branch}.remote`, remote]);
-    await this.mutate(["config", "--local", `branch.${branch}.merge`, `refs/heads/${branch}`]);
-  }
-
-  public async configureFullBranchFetch(remote: string): Promise<void> {
-    await this.mutate([
-      "config",
-      "--local",
-      "--replace-all",
-      `remote.${remote}.fetch`,
-      `+refs/heads/*:refs/remotes/${remote}/*`,
-    ]);
-  }
-
-  public async moveBranch(branch: string, target: string): Promise<void> {
-    await this.mutate(["branch", "-f", branch, target]);
-  }
-
   public async detach(): Promise<void> {
     await this.mutate(["switch", "--detach"]);
   }
@@ -671,25 +702,37 @@ export class GitRepository {
   }
 
   public async restoreCommitChanges(before: string, after: string): Promise<void> {
-    const patch = await this.run(["diff", "--binary", before, after]);
-    if (patch) {
-      await this.mutateWithInput(["apply"], `${patch}\n`);
+    const patch = (await this.executeChecked(["diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", before, after, "--"])).stdoutBytes;
+    if (patch.length) {
+      await this.mutateWithInput(["apply", "--whitespace=nowarn"], patch);
     }
   }
 
-  public async removeBranchConfiguration(branch: string): Promise<void> {
-    const result = await this.tryMutate(["config", "--local", "--remove-section", `branch.${branch}`]);
-    if (result.exitCode !== 0 && result.exitCode !== 5) {
-      throw new GitError(
-        ["config", "--local", "--remove-section", `branch.${branch}`],
-        result.stderr.trim() || `Unable to remove configuration for branch “${branch}”.`,
-        result.exitCode
-      );
+  public async verifyRestoredCommitChanges(before: string, after: string): Promise<void> {
+    const changed = (await this.runRaw(["diff", "--name-only", "--no-renames", "-z", before, after, "--"]))
+      .split("\0").filter(Boolean);
+    const expected = new Map((await this.treePaths(after)).map(entry => [entry.name, entry]));
+    for (const name of changed) {
+      const entry = expected.get(name);
+      const filename = path.join(this.root, name);
+      let actual;
+      try {
+        actual = await lstat(filename);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (!entry && !actual) continue;
+      if (!entry || !actual) throw new WipStreamError("CHECKPOINT_RESTORATION_FAILED", `Checkpoint path ${name} was not restored.`);
+      const objectId = actual.isSymbolicLink()
+        ? await this.runWithInput(["hash-object", "--stdin"], await readlink(filename, { encoding: "buffer" }))
+        : actual.isFile() ? await this.run(["hash-object", `--path=${name}`, "--", name]) : undefined;
+      const fileMode = await this.getConfig("core.filemode") !== "false";
+      const modeMatches = entry.mode === "120000" ? actual.isSymbolicLink()
+        : actual.isFile() && (!fileMode || Boolean(actual.mode & 0o111) === (entry.mode === "100755"));
+      if (objectId !== entry.objectId || !modeMatches) {
+        throw new WipStreamError("CHECKPOINT_RESTORATION_FAILED", `Checkpoint contents or mode differ at ${name}.`);
+      }
     }
-  }
-
-  public async fastForward(target: string): Promise<void> {
-    await this.mutate(["merge", "--ff-only", target]);
   }
 
   public async stageAll(): Promise<void> {
@@ -713,17 +756,6 @@ export class GitRepository {
 
   public async commit(message: string): Promise<void> {
     await this.mutate(["commit", "-m", message]);
-  }
-
-  public async pushAtomic(
-    remote: string,
-    refspecs: readonly string[],
-    leases: Readonly<Record<string, string>> = {}
-  ): Promise<void> {
-    const leaseArgs = Object.entries(leases).map(
-      ([branch, expected]) => `--force-with-lease=refs/heads/${branch}:${expected}`
-    );
-    await this.mutateNetwork(["push", "--atomic", ...leaseArgs, remote, ...refspecs]);
   }
 
   public async pushRefsAtomic(
@@ -760,15 +792,5 @@ export class GitRepository {
 
   public async verifyAtomicPushSupport(remote: string, ref: string, objectId: string): Promise<void> {
     await this.pushRefsAtomic(remote, [{ ref, expected: objectId, proposed: objectId }], true);
-  }
-
-  public async verifyAtomicPush(remote: string, branch: string): Promise<void> {
-    await this.mutateNetwork(["push", "--atomic", "--dry-run", remote, `${branch}:${branch}`]);
-  }
-
-  public async deleteLocalBranch(branch: string): Promise<void> {
-    if (await this.branchExists(branch)) {
-      await this.mutate(["branch", "-d", branch]);
-    }
   }
 }

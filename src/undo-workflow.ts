@@ -1,12 +1,13 @@
 import { GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
 import { fail, WipStreamError } from "./errors";
 import { readRepositoryConfiguration } from "./repository-model";
-import { withRepositoryCommandLock } from "./repository-safety";
+import { withRepositoryWorkflow } from "./repository-safety";
 import {
   ConfigurationTransition,
   OperationReceipt,
   applyLocalRefTransaction,
-  beginOperation,
+  applyRemoteHeadTransition,
+  withRecordedOperation,
   completeOperation,
   createOperationPlan,
   inspectIncompleteOperations,
@@ -102,6 +103,9 @@ async function localStateMatches(repo: GitRepository, receipt: OperationReceipt)
   for (const change of receipt.plan.configurationChanges ?? []) {
     if (!arraysEqual(await repo.getConfigValues(change.key), change.after)) return `Configuration ${change.key} changed later.`;
   }
+  if (receipt.plan.remoteHead && (await repo.symbolicRef(`refs/remotes/${receipt.plan.remoteHead.remote}/HEAD`) ?? null) !== receipt.plan.remoteHead.after) {
+    return "The remote default ref changed after the operation.";
+  }
   return undefined;
 }
 
@@ -126,7 +130,7 @@ export async function inspectUndoEligibility(repo: GitRepository): Promise<UndoE
 }
 
 export async function undoLastAction(repo: GitRepository, hooks: UndoHooks = {}): Promise<UndoResult> {
-  return withRepositoryCommandLock(repo, "Undo", () => undoLastActionUnlocked(repo, hooks));
+  return withRepositoryWorkflow(repo, "Undo", () => undoLastActionUnlocked(repo, hooks));
 }
 
 async function undoLastActionUnlocked(repo: GitRepository, hooks: UndoHooks): Promise<UndoResult> {
@@ -177,37 +181,57 @@ async function undoLastActionUnlocked(repo: GitRepository, hooks: UndoHooks): Pr
     configurationChanges: reverseConfiguration.map((change) => ({
       key: change.key, before: change.after, after: change.before,
     })),
+    checkpointRestoration: receipt.plan.checkpoint && {
+      before: receipt.plan.checkpoint.before,
+      after: receipt.plan.checkpoint.after,
+    },
+    remoteHead: receipt.plan.remoteHead && {
+      remote: receipt.plan.remoteHead.remote,
+      before: receipt.plan.remoteHead.after,
+      after: receipt.plan.remoteHead.before,
+    },
     checkout: { before: receipt.plan.checkout.after, after: receipt.plan.checkout.before },
   });
-  await beginOperation(repo, undoPlan);
-  if (reverseRemote.length) {
-    await withMutationBoundary(repo, undoPlan.operationId, "remote-push", () => repo.pushRefsAtomic(remote, reverseRemote));
-    await hooks.afterRemotePush?.();
-    await withMutationBoundary(repo, undoPlan.operationId, "remote-fetch", () => repo.fetchAllBranches(remote));
-  }
-  const currentBranch = await repo.currentBranch();
-  if (currentBranch && reverseLocal.some((update) => update.ref === repo.localRef(currentBranch))) {
-    await withMutationBoundary(repo, undoPlan.operationId, "checkout", () => repo.detach());
-  }
-  if (reverseLocal.length) await applyLocalRefTransaction(repo, undoPlan);
-  if (receipt.plan.checkout.before) {
-    await withMutationBoundary(repo, undoPlan.operationId, "checkout", () => repo.switch(receipt.plan.checkout.before as string));
-  }
-  if (reverseConfiguration.length) {
-    await withMutationBoundary(repo, undoPlan.operationId, "configuration", async () => {
-      for (const change of reverseConfiguration) await repo.replaceConfigValues(change.key, change.before);
-    });
-  }
-  if (receipt.plan.checkpoint) {
-    await repo.restoreCommitChanges(receipt.plan.checkpoint.before, receipt.plan.checkpoint.after);
-  }
-  await completeOperation(repo, undoPlan.operationId);
-  await markOperationUndone(repo, receipt.plan.operationId);
-  return {
-    operationId: undoPlan.operationId,
-    undoneOperationId: receipt.plan.operationId,
-    command: receipt.plan.command,
-    restoredCheckout: receipt.plan.checkout.before,
-    restoredCheckpoint: Boolean(receipt.plan.checkpoint),
-  };
+  return withRecordedOperation(repo, undoPlan, async () => {
+    if (reverseRemote.length) {
+      await withMutationBoundary(repo, undoPlan.operationId, "remote-push", () => repo.pushRefsAtomic(remote, reverseRemote));
+      await hooks.afterRemotePush?.();
+      await withMutationBoundary(repo, undoPlan.operationId, "remote-fetch", () => repo.fetchAllBranches(remote));
+    }
+    const currentBranch = await repo.currentBranch();
+    if (currentBranch && reverseLocal.some((update) => update.ref === repo.localRef(currentBranch))) {
+      await withMutationBoundary(repo, undoPlan.operationId, "checkout", () => repo.detach());
+    }
+    if (reverseLocal.length) await applyLocalRefTransaction(repo, undoPlan);
+    if (receipt.plan.checkout.before) {
+      await withMutationBoundary(repo, undoPlan.operationId, "checkout", () => repo.switch(receipt.plan.checkout.before as string));
+    }
+    if (reverseConfiguration.length) {
+      await withMutationBoundary(repo, undoPlan.operationId, "configuration", async () => {
+        for (const change of reverseConfiguration) await repo.replaceConfigValues(change.key, change.before);
+      });
+    }
+    const restoration = undoPlan.checkpointRestoration;
+    if (restoration) {
+      await withMutationBoundary(repo, undoPlan.operationId, "checkpoint-restoration", async () => {
+        await repo.restoreCommitChanges(restoration.before, restoration.after);
+        await repo.verifyRestoredCommitChanges(restoration.before, restoration.after);
+      });
+    }
+    await applyRemoteHeadTransition(repo, undoPlan);
+    for (const change of undoPlan.configurationChanges) {
+      if (!arraysEqual(await repo.getConfigValues(change.key), change.after)) {
+        return fail("UNDO_CONFIGURATION_FAILED", `Undo could not verify configuration ${change.key}.`);
+      }
+    }
+    await completeOperation(repo, undoPlan.operationId);
+    await markOperationUndone(repo, receipt.plan.operationId);
+    return {
+      operationId: undoPlan.operationId,
+      undoneOperationId: receipt.plan.operationId,
+      command: receipt.plan.command,
+      restoredCheckout: receipt.plan.checkout.before,
+      restoredCheckpoint: Boolean(receipt.plan.checkpoint),
+    };
+  });
 }

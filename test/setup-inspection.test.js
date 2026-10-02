@@ -46,7 +46,7 @@ async function inspectWithoutMutation() {
     writeFileSync(path.join(local.directory, "ignored.txt"), "changed ignored contents\n");
     const second = await inspectRepositorySetup(local.repo, undefined, hooks);
     assert.equal(second.local.status, inspection.local.status);
-    assert.notEqual(second.local.files, inspection.local.files, "unchanged porcelain does not hide a file change");
+    assert.equal(second.local.files, inspection.local.files, "ignored activity does not invalidate local-work approval");
     assert.ok(Object.isFrozen(inspection));
   });
 }

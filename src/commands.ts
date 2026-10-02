@@ -1,7 +1,8 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { EXTENSION_NAME } from "./constants";
-import { WipStreamError } from "./errors";
+import { errorCode, WipStreamError } from "./errors";
+import { isWithin } from "./paths";
 import { inspectPendingMerge } from "./conflict-workflow";
 import {
     CommitAndSaveHooks,
@@ -15,7 +16,6 @@ import {
     finishBranch,
 } from "./lifecycle-workflow";
 import {
-    getBranchParent,
     readRepositoryConfiguration,
     resolveRemoteTrackingDefaultBranch,
 } from "./repository-model";
@@ -24,25 +24,9 @@ import { inspectUndoEligibility } from "./undo-workflow";
 import type { SetupEditorState } from "./setup-workflow";
 
 const CONTEXT_KEYS = [
-    "wipstream.initialized",
-    "wipstream.finishAvailable",
-    "wipstream.updateAvailable",
-    "wipstream.reconcileAvailable",
-    "wipstream.pendingMerge",
     "wipstream.undoAvailable",
     "wipstream.condenseAvailable",
 ] as const;
-
-function isWithin(root: string, file: string): boolean {
-    const relative = path.relative(root, file);
-    return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
-}
-
-function errorCode(error: unknown): string | undefined {
-    return typeof error === "object" && error !== null && "code" in error
-        ? String((error as { code?: unknown }).code)
-        : undefined;
-}
 
 function operationDetail(operationId: string | undefined): string {
     return operationId ? ` operation=${operationId}` : "";
@@ -216,9 +200,7 @@ async function refreshCommandContexts(preferred?: GitRepository): Promise<void> 
     try {
         const configuration = await readRepositoryConfiguration(repo);
         if (configuration.kind !== "initialized") return;
-        await setContext("wipstream.initialized", true);
         const pending = await inspectPendingMerge(repo);
-        await setContext("wipstream.pendingMerge", Boolean(pending));
         if (pending) return;
 
         await setContext("wipstream.undoAvailable", (await inspectUndoEligibility(repo)).eligible);
@@ -226,22 +208,7 @@ async function refreshCommandContexts(preferred?: GitRepository): Promise<void> 
         if (!branch) return;
         const remoteDefault = await resolveRemoteTrackingDefaultBranch(repo, configuration.remote);
         const isFeatureBranch = branch !== remoteDefault;
-        await setContext("wipstream.finishAvailable", isFeatureBranch);
         await setContext("wipstream.condenseAvailable", isFeatureBranch);
-
-        const remoteRef = repo.remoteTrackingRef(configuration.remote, branch);
-        if (await repo.refExists(remoteRef)) {
-            await setContext(
-                "wipstream.reconcileAvailable",
-                (await repo.relation(repo.localRef(branch), remoteRef)) === "diverged"
-            );
-        }
-        const parent = await getBranchParent(repo, branch) ?? remoteDefault;
-        if (parent !== branch && await repo.branchExists(parent)) {
-            const parentContainsBranch = await repo.isAncestor(repo.localRef(branch), repo.localRef(parent));
-            const branchContainsParent = await repo.isAncestor(repo.localRef(parent), repo.localRef(branch));
-            await setContext("wipstream.updateAvailable", !parentContainsBranch && !branchContainsParent);
-        }
     } catch {
         // Context is advisory. Command preflights remain authoritative.
     }
@@ -259,7 +226,7 @@ export async function handleCommandError(
         await showError(output, incomplete.length
             ? new WipStreamError(
                 "INCOMPLETE_WIPSTREAM_OPERATION",
-                `Network activity was cancelled during operation “${incomplete[0].plan.operationId}”. Inspect it before continuing.`
+                `Network activity was cancelled with incomplete operations: ${incomplete.map(receipt => receipt.plan.operationId).join(", ")}. Inspect them before continuing.`
             )
             : new WipStreamError("CANCELLED", `${title} was cancelled before an operation began.`));
     } else {

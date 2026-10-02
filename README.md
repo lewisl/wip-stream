@@ -257,6 +257,12 @@ attempt and refuses to run while Git has an active operation or unresolved
 index conflicts. It does not publish, undo the attempt, or certify synchronization.
 If several attempts are incomplete, inspect and resolve each one.
 
+Recover can reclaim a command lock left by a dead process on this machine. It
+preserves the old lock record and serializes competing recovery attempts through
+an exact Git lease. Active owners, other hosts, and unreadable ownership records
+remain blocked for inspection. A refusal before any recorded mutation starts
+closes that attempt automatically; any already-created checkpoint stays local.
+
 For interrupted remote adoption, recovery displays the backup location and
 offers **Open Backup Folder** afterward. Keeping current state does not restore
 that backup. Retry through Initialize, including when replacement stopped with
@@ -270,9 +276,9 @@ outcome, explicit recovery is required. Do not delete receipt files manually.
 
 | Command | Purpose | Shortcut |
 | --- | --- | --- |
-| Initialize Repository | Choose authoritative work and set up a clone | `Ctrl+W`, then `I` |
-| Get from Remote | Retrieve all branches before resuming here | `Ctrl+W`, then `G` |
-| Commit and Save | Checkpoint work and synchronize all branches | `Ctrl+W`, then `S` |
+| Initialize Repository | Choose authoritative work and set up a clone | Command Palette |
+| Get from Remote | Retrieve all branches before resuming here | Command Palette |
+| Commit and Save | Checkpoint work and synchronize all branches | Command Palette |
 | Start Branch | Begin a task from the current branch | Command Palette |
 | Finish Branch | Incorporate completed work into its parent | Command Palette |
 | Update from Parent | Bring the parent's changes into the work branch | Command Palette |
@@ -282,6 +288,8 @@ outcome, explicit recovery is required. Do not delete receipt files manually.
 | Recover Incomplete Operation | Inspect a stopped attempt and keep the current state | Command Palette |
 | Undo Last Action | Reverse the latest eligible WipStream action | Shown when eligible |
 | Condense Branch (Advanced) | Replace branch-only checkpoint history with one commit | Shown on work branches |
+
+WipStream activates after window startup so eligible contextual commands appear before you run another WipStream command. Assign shortcuts through VS Code's Keyboard Shortcuts editor; the extension does not override platform keys.
 
 ## Safety and implementation details
 
@@ -311,7 +319,7 @@ npm run package
 
 Packaging does not install or publish anything. When ready, install the packaged
 file with **Extensions: Install from VSIX...**, or explicitly run
-`code --install-extension dist/lewisl.wipstream-0.2.8.vsix --force`. Install the
+`code --install-extension dist/lewisl.wipstream-0.2.9.vsix --force`. Install the
 same version on each computer used for the workflow.
 
 `npm test` uses disposable local remotes and ordinary clones without contacting

@@ -1,8 +1,8 @@
 import { randomUUID } from "crypto";
-import { open, mkdir, readFile, unlink } from "fs/promises";
+import { open, mkdir, readFile, unlink, lstat, rename } from "fs/promises";
 import { hostname } from "os";
 import * as path from "path";
-import { fail as failWipStream, WipStreamError } from "./errors";
+import { errorCode, fail as failWipStream, WipStreamError } from "./errors";
 import { GitRepository } from "./git";
 import { inspectIncompleteOperations } from "./operations";
 import { recoverExternalMerge } from "./merge-recovery";
@@ -40,12 +40,15 @@ export async function requireRepositoryPreflight(
   }
   const incomplete = await inspectIncompleteOperations(repo);
   for (const receipt of incomplete) {
-    if (await recoverExternalMerge(repo, receipt)) continue;
     refuse(
       "INCOMPLETE_WIPSTREAM_OPERATION",
       `WipStream operation “${receipt.plan.operationId}” (${receipt.plan.command}, ${receipt.phase}) is incomplete. Run WipStream: Recover Incomplete Operation to inspect it and keep your current files and commits, then retry ${command}.`
     );
   }
+}
+
+export async function recoverResolvedExternalMerges(repo: GitRepository): Promise<void> {
+  for (const receipt of await inspectIncompleteOperations(repo)) await recoverExternalMerge(repo, receipt);
 }
 
 export interface CommandLockRecord {
@@ -75,12 +78,6 @@ export class CommandLockError extends WipStreamError {
   }
 }
 
-function errorCode(error: unknown): string | undefined {
-  return typeof error === "object" && error !== null && "code" in error
-    ? String((error as { code?: unknown }).code)
-    : undefined;
-}
-
 function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -99,6 +96,7 @@ function isLockRecord(value: unknown): value is CommandLockRecord {
     && typeof record.operationId === "string"
     && typeof record.command === "string"
     && typeof record.pid === "number"
+    && Number.isSafeInteger(record.pid) && record.pid > 0
     && typeof record.hostname === "string"
     && typeof record.startedAt === "string"
     && typeof record.repositoryRoot === "string";
@@ -128,7 +126,7 @@ function lockError(lockPath: string, existing: CommandLockRecord | undefined): C
   if (existing.hostname === hostname() && !processIsAlive(existing.pid)) {
     return new CommandLockError(
       "STALE_COMMAND_LOCK",
-      `WipStream found a stale command lock at ${lockPath} (${detail}). Inspect the interrupted operation before removing the lock.`,
+      `WipStream found a stale command lock at ${lockPath} (${detail}). Run Recover Incomplete Operation to inspect and reclaim it.`,
       lockPath,
       existing
     );
@@ -143,6 +141,62 @@ function lockError(lockPath: string, existing: CommandLockRecord | undefined): C
 
 export async function commandLockPath(repo: GitRepository): Promise<string> {
   return path.join(await repo.commonGitDirectory(), "wipstream", "command.lock");
+}
+
+const LOCK_RECOVERY_REF = "refs/wipstream/command-lock-recovery";
+
+async function requireNoLockRecovery(repo: GitRepository): Promise<void> {
+  if (await repo.objectId(LOCK_RECOVERY_REF)) {
+    throw new CommandLockError("COMMAND_IN_PROGRESS", "A command-lock recovery lease exists. Run Recover Incomplete Operation if its owner was interrupted.", await commandLockPath(repo));
+  }
+}
+
+/** Git's exact-old transaction serializes recovery, including after a crash. */
+export async function recoverStaleCommandLock(repo: GitRepository): Promise<boolean> {
+  await repo.assertSingleWorktree();
+  const lockPath = await commandLockPath(repo);
+  const previousLease = await repo.objectId(LOCK_RECOVERY_REF) ?? null;
+  if (previousLease) {
+    let owner: unknown;
+    try { owner = JSON.parse(await repo.runRaw(["cat-file", "blob", previousLease])); } catch { owner = undefined; }
+    if (!isLockRecord(owner) || owner.repositoryRoot !== repo.root || owner.hostname !== hostname() || processIsAlive(owner.pid)) {
+      throw new CommandLockError("COMMAND_IN_PROGRESS", "The lock-recovery owner is active, on another host, or cannot be verified. Its lease was preserved for inspection.", lockPath);
+    }
+  }
+  const owner: CommandLockRecord = {
+    schemaVersion: 1, operationId: randomUUID(), command: "Recover command lock",
+    pid: process.pid, hostname: hostname(), startedAt: new Date().toISOString(), repositoryRoot: repo.root,
+  };
+  const lease = await repo.createBlob(JSON.stringify(owner));
+  try {
+    await repo.updateRefs([{ ref: LOCK_RECOVERY_REF, expectedOld: previousLease, proposed: lease }]);
+  } catch {
+    throw new CommandLockError("COMMAND_IN_PROGRESS", "Another process acquired the command-lock recovery lease. Retry recovery after it finishes.", lockPath);
+  }
+  try {
+    let identity;
+    try { identity = await lstat(lockPath); } catch (error) {
+      if (errorCode(error) === "ENOENT") return previousLease !== null;
+      throw error;
+    }
+    const existing = await readLock(lockPath);
+    if (!existing || !identity.isFile() || existing.repositoryRoot !== repo.root
+      || (process.getuid && identity.uid !== process.getuid())
+      || existing.hostname !== hostname() || processIsAlive(existing.pid)) {
+      throw lockError(lockPath, existing);
+    }
+    // Inspect receipts before reclaiming; corrupt recovery history must not be bypassed.
+    await inspectIncompleteOperations(repo);
+    const verified = await lstat(lockPath);
+    if (verified.ino !== identity.ino || verified.dev !== identity.dev
+      || JSON.stringify(await readLock(lockPath)) !== JSON.stringify(existing)) {
+      throw new CommandLockError("COMMAND_LOCK_CHANGED", "The stale command lock changed during recovery; it was preserved.", lockPath);
+    }
+    await rename(lockPath, `${lockPath}.recovered-${owner.operationId}`);
+    return true;
+  } finally {
+    await repo.updateRefs([{ ref: LOCK_RECOVERY_REF, expectedOld: lease, proposed: null }]);
+  }
 }
 
 export class RepositoryCommandLock {
@@ -198,6 +252,7 @@ export async function acquireRepositoryCommandLock(
   };
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    await requireNoLockRecovery(repo);
     try {
       const handle = await open(lockPath, "wx", 0o600);
       try {
@@ -207,6 +262,7 @@ export async function acquireRepositoryCommandLock(
       }
       const lock = new RepositoryCommandLock(lockPath, record);
       try {
+        await requireNoLockRecovery(repo);
         await repo.assertSingleWorktree();
       } catch (error) {
         await lock.release();
@@ -241,4 +297,16 @@ export async function withRepositoryCommandLock<T>(
   } finally {
     await lock.release();
   }
+}
+
+/** Recognize externally resolved merges under the ordinary command lock. */
+export async function withRepositoryWorkflow<T>(
+  repo: GitRepository,
+  command: string,
+  action: () => Promise<T>
+): Promise<T> {
+  return withRepositoryCommandLock(repo, command, async () => {
+    await recoverResolvedExternalMerges(repo);
+    return action();
+  });
 }

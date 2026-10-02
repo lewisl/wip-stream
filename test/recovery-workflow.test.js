@@ -9,7 +9,7 @@ const { abortPendingMerge, continuePendingMerge, reconcileWithRemote } = require
 const { inspectIncompleteOperations, readOperationReceipt, recordPendingMerge } = require("../out/operations");
 const { inspectExternalMergeResolution } = require("../out/merge-recovery");
 const { recoverIncompleteOperation } = require("../out/recovery-workflow");
-const { requireRepositoryPreflight, withRepositoryCommandLock } = require("../out/repository-safety");
+const { requireRepositoryPreflight, withRepositoryWorkflow } = require("../out/repository-safety");
 const { inspectUndoEligibility } = require("../out/undo-workflow");
 
 function git(cwd, args) {
@@ -65,7 +65,7 @@ function snapshot({ first, remote }) {
 }
 
 async function preflight(repo) {
-  await withRepositoryCommandLock(repo, "Recovery test", () => requireRepositoryPreflight(repo, {
+  await withRepositoryWorkflow(repo, "Recovery test", () => requireRepositoryPreflight(repo, {
     command: "Recovery test", cleanWorktree: false, cleanSubmodules: false,
   }));
 }

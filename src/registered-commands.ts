@@ -23,6 +23,7 @@ import { inspectUndoEligibility, undoLastAction } from "./undo-workflow";
 import { inspectIncompleteOperations, renderOperationPreview } from "./operations";
 import { recoverIncompleteOperation } from "./recovery-workflow";
 import { reportSetupRecovery, runRepositorySetup } from "./setup-ui";
+import { recoverStaleCommandLock } from "./repository-safety";
 
 type CommandAction = (
     output: vscode.OutputChannel,
@@ -70,13 +71,7 @@ function registerCommand(
     cancellable: boolean,
     action: CommandAction
 ): void {
-    const handler = runCommand.bind(
-        undefined,
-        output,
-        title,
-        cancellable,
-        action
-    );
+    const handler = () => runCommand(output, title, cancellable, action);
 
     context.subscriptions.push(
         vscode.commands.registerCommand(
@@ -258,8 +253,14 @@ async function abortCommand(
 
 async function recoverCommand(output: vscode.OutputChannel, networkSignal: AbortSignal): Promise<void> {
     const repo = await cmd.selectRepository(networkSignal);
+    const lockRecovered = await recoverStaleCommandLock(repo);
     const incomplete = await inspectIncompleteOperations(repo);
     if (!incomplete.length) {
+        if (lockRecovered) {
+            cmd.showSuccess(output, "Recover Incomplete Operation", "staleLockReclaimed=true", undefined,
+                "Reclaimed the stale command lock. No incomplete operation remains; current files and commits were kept.");
+            return;
+        }
         throw new WipStreamError("NO_INCOMPLETE_OPERATION", "No WipStream operation needs recovery. Run Commit and Save to synchronize your work.");
     }
     const selected = incomplete.length === 1 ? incomplete[0] : (await vscode.window.showQuickPick(

@@ -8,10 +8,10 @@ import {
   setBranchParent,
   snapshotRemoteTrackingTips,
 } from "./repository-model";
-import { requireRepositoryPreflight, withRepositoryCommandLock } from "./repository-safety";
+import { requireRepositoryPreflight, withRepositoryWorkflow } from "./repository-safety";
 import {
   applyLocalRefTransaction,
-  beginOperation,
+  withRecordedOperation,
   completeOperation,
   createOperationPlan,
   recordPendingMerge,
@@ -165,7 +165,7 @@ async function verifyParity(repo: GitRepository, remote: string, command: string
 }
 
 export async function startBranch(repo: GitRepository, requestedBranch: string): Promise<StartBranchResult> {
-  return withRepositoryCommandLock(repo, "Start Branch", () => startBranchUnlocked(repo, requestedBranch));
+  return withRepositoryWorkflow(repo, "Start Branch", () => startBranchUnlocked(repo, requestedBranch));
 }
 
 async function startBranchUnlocked(repo: GitRepository, requestedBranch: string): Promise<StartBranchResult> {
@@ -187,19 +187,27 @@ async function startBranchUnlocked(repo: GitRepository, requestedBranch: string)
     localRefUpdates: [{ ref: repo.localRef(branch), expectedOld: null, proposed: parentTip }],
     checkout: { before: parent, after: branch },
   });
-  await beginOperation(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switchNewBranch(branch, parentTip));
-  await withMutationBoundary(repo, plan.operationId, "configuration", () => setBranchParent(repo, branch, parent));
-  await completeOperation(repo, plan.operationId);
-  return { operationId: plan.operationId, branch, parent };
+  return withRecordedOperation(repo, plan, async () => {
+    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switchNewBranch(branch, parentTip));
+    await withMutationBoundary(repo, plan.operationId, "configuration", () => setBranchParent(repo, branch, parent));
+    await completeOperation(repo, plan.operationId);
+    return { operationId: plan.operationId, branch, parent };
+  });
 }
 
 export async function updateFromParent(
   repo: GitRepository,
   selectParent?: ParentSelector
 ): Promise<UpdateFromParentResult> {
-  await getFromRemote(repo);
-  return withRepositoryCommandLock(repo, "Update from Parent", () => updateFromParentUnlocked(repo, selectParent));
+  const intendedBranch = await repo.currentBranch();
+  if (!intendedBranch) return fail("DETACHED_HEAD", "Check out the branch to update.");
+  const fetched = await getFromRemote(repo);
+  return withRepositoryWorkflow(repo, "Update from Parent", async () => {
+    if (fetched.checkout !== intendedBranch || await repo.currentBranch() !== intendedBranch) {
+      return fail("UPDATE_CHECKOUT_CHANGED", `Get from Remote completed, but the checkout changed from “${intendedBranch}”. Select the branch you intend to update and run Update from Parent again.`);
+    }
+    return updateFromParentUnlocked(repo, selectParent);
+  });
 }
 
 async function updateFromParentUnlocked(
@@ -212,6 +220,9 @@ async function updateFromParentUnlocked(
     return fail("DETACHED_HEAD", "Check out the branch to update.");
   }
   const parent = await resolveParent(repo, branch, remote, selectParent);
+  if (await repo.currentBranch() !== branch) {
+    return fail("UPDATE_CHECKOUT_CHANGED", "The checkout changed while choosing the parent. Select the intended branch and retry.");
+  }
   if (await repo.isAncestor(repo.localRef(parent), repo.localRef(branch))) {
     return { branch, parent, updated: false };
   }
@@ -240,41 +251,42 @@ async function updateFromParentUnlocked(
       description: `Merge parent ${parent} into ${branch}`,
     }],
   });
-  await beginOperation(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "local-refs", () => repo.updateRefs([{
-    ref: recoveryRef(plan.operationId, 0),
-    expectedOld: null,
-    proposed: before,
-  }]));
-  try {
-    await withMutationBoundary(repo, plan.operationId, "merge", async () => {
-      await recordPendingMerge(repo, plan.operationId, pendingMerge);
-      await repo.merge(mergeTargetCommit);
-    });
-  } catch (error) {
-    const conflicts = await repo.conflictPaths();
-    if (error instanceof GitError && (await repo.operationInProgress()) && conflicts.length) {
-      await recordPendingMerge(repo, plan.operationId, {
-        ...pendingMerge,
-        conflicts,
+  return withRecordedOperation(repo, plan, async () => {
+    await withMutationBoundary(repo, plan.operationId, "local-refs", () => repo.updateRefs([{
+      ref: recoveryRef(plan.operationId, 0),
+      expectedOld: null,
+      proposed: before,
+    }]));
+    try {
+      await withMutationBoundary(repo, plan.operationId, "merge", async () => {
+        await recordPendingMerge(repo, plan.operationId, pendingMerge);
+        await repo.merge(mergeTargetCommit);
       });
-      return { operationId: plan.operationId, branch, parent, updated: false, pending: true, conflicts };
+    } catch (error) {
+      const conflicts = await repo.conflictPaths();
+      if (error instanceof GitError && await repo.operationInProgress()) {
+        await recordPendingMerge(repo, plan.operationId, {
+          ...pendingMerge,
+          conflicts,
+        });
+        return { operationId: plan.operationId, branch, parent, updated: false, pending: true, conflicts };
+      }
+      throw error;
     }
-    throw error;
-  }
-  await recordOperationOutcome(repo, plan.operationId, {
-    additionalLocalRefUpdates: [{
-      ref: repo.localRef(branch),
-      expectedOld: before,
-      proposed: await repo.hash(repo.localRef(branch)),
-    }],
+    await recordOperationOutcome(repo, plan.operationId, {
+      additionalLocalRefUpdates: [{
+        ref: repo.localRef(branch),
+        expectedOld: before,
+        proposed: await repo.hash(repo.localRef(branch)),
+      }],
+    });
+    await completeOperation(repo, plan.operationId);
+    return { operationId: plan.operationId, branch, parent, updated: true };
   });
-  await completeOperation(repo, plan.operationId);
-  return { operationId: plan.operationId, branch, parent, updated: true };
 }
 
 export async function finishBranch(repo: GitRepository, options: FinishBranchOptions): Promise<FinishBranchResult> {
-  const prepared = await withRepositoryCommandLock(repo, "Finish Branch preview", async (): Promise<PreparedFinish> => {
+  const prepared = await withRepositoryWorkflow(repo, "Finish Branch preview", async (): Promise<PreparedFinish> => {
     const remote = await requireLifecycleRepository(repo, "Finish Branch", false);
     const branch = await repo.currentBranch();
     if (!branch) return fail("DETACHED_HEAD", "Check out the work branch you want to finish.");
@@ -309,7 +321,7 @@ export async function finishBranch(repo: GitRepository, options: FinishBranchOpt
   if (!saved.published) {
     return fail("SAVE_HANDOFF_INCOMPLETE", `${saved.message} Finish did not move the parent branch.`);
   }
-  return withRepositoryCommandLock(repo, "Finish Branch", () => finishBranchUnlocked(repo, prepared, saved));
+  return withRepositoryWorkflow(repo, "Finish Branch", () => finishBranchUnlocked(repo, prepared, saved));
 }
 
 async function finishBranchUnlocked(
@@ -357,11 +369,8 @@ async function finishBranchUnlocked(
     localUpdates.push({ ref: repo.localRef(branch), expectedOld: branchTip, proposed: null });
   }
   const configurationChanges = disposition === "delete"
-    ? await Promise.all([
-      `branch.${branch}.remote`,
-      `branch.${branch}.merge`,
-      `branch.${branch}.wipstreamParent`,
-    ].map(async (key) => ({ key, before: await repo.getConfigValues(key), after: [] })))
+    ? await Promise.all((await repo.branchConfigurationKeys(branch))
+      .map(async key => ({ key, before: await repo.getConfigValues(key), after: [] })))
     : [{
       key: `branch.${branch}.wipstreamParent`,
       before: await repo.getConfigValues(`branch.${branch}.wipstreamParent`),
@@ -381,27 +390,28 @@ async function finishBranchUnlocked(
       ] : []),
     ],
   });
-  await beginOperation(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "remote-push", () => repo.pushRefsAtomic(remote, remoteUpdates));
-  await withMutationBoundary(repo, plan.operationId, "remote-fetch", () => repo.fetchAllBranches(remote));
-  await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
-  await applyLocalRefTransaction(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(parent));
-  if (configurationChanges.length) {
-    await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
-      for (const change of configurationChanges) await repo.replaceConfigValues(change.key, change.after);
-    });
-  }
-  await verifyParity(repo, remote, "Finish Branch");
-  await completeOperation(repo, plan.operationId);
-  return { operationId: plan.operationId, branch, parent, disposition, save: saved };
+  return withRecordedOperation(repo, plan, async () => {
+    await withMutationBoundary(repo, plan.operationId, "remote-push", () => repo.pushRefsAtomic(remote, remoteUpdates));
+    await withMutationBoundary(repo, plan.operationId, "remote-fetch", () => repo.fetchAllBranches(remote));
+    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
+    await applyLocalRefTransaction(repo, plan);
+    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(parent));
+    if (configurationChanges.length) {
+      await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
+        for (const change of configurationChanges) await repo.replaceConfigValues(change.key, change.after);
+      });
+    }
+    await verifyParity(repo, remote, "Finish Branch");
+    await completeOperation(repo, plan.operationId);
+    return { operationId: plan.operationId, branch, parent, disposition, save: saved };
+  });
 }
 
 export async function condenseBranch(
   repo: GitRepository,
   options: CondenseBranchOptions
 ): Promise<CondenseBranchResult> {
-  return withRepositoryCommandLock(repo, "Condense Branch", () => condenseBranchUnlocked(repo, options));
+  return withRepositoryWorkflow(repo, "Condense Branch", () => condenseBranchUnlocked(repo, options));
 }
 
 async function condenseBranchUnlocked(
@@ -447,13 +457,14 @@ async function condenseBranchUnlocked(
       { kind: "rewrite-local-ref", ref: repo.localRef(branch), description: `Replace local ${branch} checkpoints` },
     ],
   });
-  await beginOperation(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "remote-push", () => repo.pushRefsAtomic(remote, [remoteUpdate]));
-  await withMutationBoundary(repo, plan.operationId, "remote-fetch", () => repo.fetchAllBranches(remote));
-  await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
-  await applyLocalRefTransaction(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(branch));
-  await verifyParity(repo, remote, "Condense Branch");
-  await completeOperation(repo, plan.operationId);
-  return { operationId: plan.operationId, branch, parent, oldTip, newTip, exclusiveCommits };
+  return withRecordedOperation(repo, plan, async () => {
+    await withMutationBoundary(repo, plan.operationId, "remote-push", () => repo.pushRefsAtomic(remote, [remoteUpdate]));
+    await withMutationBoundary(repo, plan.operationId, "remote-fetch", () => repo.fetchAllBranches(remote));
+    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
+    await applyLocalRefTransaction(repo, plan);
+    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(branch));
+    await verifyParity(repo, remote, "Condense Branch");
+    await completeOperation(repo, plan.operationId);
+    return { operationId: plan.operationId, branch, parent, oldTip, newTip, exclusiveCommits };
+  });
 }

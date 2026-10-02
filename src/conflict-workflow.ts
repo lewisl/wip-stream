@@ -7,12 +7,12 @@ import {
   readRepositoryConfiguration,
   snapshotRemoteTrackingTips,
 } from "./repository-model";
-import { requireRepositoryPreflight, withRepositoryCommandLock } from "./repository-safety";
+import { requireRepositoryPreflight, withRepositoryCommandLock, withRepositoryWorkflow } from "./repository-safety";
 import {
   OperationReceipt,
   PendingMerge,
   abortOperation,
-  beginOperation,
+  withRecordedOperation,
   completeOperation,
   createOperationPlan,
   inspectIncompleteOperations,
@@ -111,7 +111,7 @@ export async function reconcileWithRemote(
   repo: GitRepository,
   saveHooks: CommitAndSaveHooks = {}
 ): Promise<ReconcileResult> {
-  const merge = await withRepositoryCommandLock(
+  const merge = await withRepositoryWorkflow(
     repo,
     "Reconcile with Remote",
     () => reconcileWithRemoteUnlocked(repo)
@@ -170,37 +170,38 @@ async function reconcileWithRemoteUnlocked(repo: GitRepository): Promise<Reconci
       description: `Merge fetched ${remote}/${branch} into ${branch}`,
     }],
   });
-  await beginOperation(repo, plan);
-  await withMutationBoundary(repo, plan.operationId, "local-refs", () => repo.updateRefs([{
-    ref: recoveryRef(plan.operationId, 0),
-    expectedOld: null,
-    proposed: before,
-  }]));
-  try {
-    await withMutationBoundary(repo, plan.operationId, "merge", async () => {
-      await recordPendingMerge(repo, plan.operationId, pendingMerge);
-      await repo.merge(mergeTargetCommit);
-    });
-  } catch (error) {
-    const conflicts = await repo.conflictPaths();
-    if (error instanceof GitError && await repo.operationInProgress()) {
-      await recordPendingMerge(repo, plan.operationId, {
-        ...pendingMerge,
-        conflicts,
+  return withRecordedOperation(repo, plan, async () => {
+    await withMutationBoundary(repo, plan.operationId, "local-refs", () => repo.updateRefs([{
+      ref: recoveryRef(plan.operationId, 0),
+      expectedOld: null,
+      proposed: before,
+    }]));
+    try {
+      await withMutationBoundary(repo, plan.operationId, "merge", async () => {
+        await recordPendingMerge(repo, plan.operationId, pendingMerge);
+        await repo.merge(mergeTargetCommit);
       });
-      return { operationId: plan.operationId, branch, pending: true, conflicts };
+    } catch (error) {
+      const conflicts = await repo.conflictPaths();
+      if (error instanceof GitError && await repo.operationInProgress()) {
+        await recordPendingMerge(repo, plan.operationId, {
+          ...pendingMerge,
+          conflicts,
+        });
+        return { operationId: plan.operationId, branch, pending: true, conflicts };
+      }
+      throw error;
     }
-    throw error;
-  }
-  await recordOperationOutcome(repo, plan.operationId, {
-    additionalLocalRefUpdates: [{
-      ref: repo.localRef(branch),
-      expectedOld: before,
-      proposed: await repo.hash(repo.localRef(branch)),
-    }],
+    await recordOperationOutcome(repo, plan.operationId, {
+      additionalLocalRefUpdates: [{
+        ref: repo.localRef(branch),
+        expectedOld: before,
+        proposed: await repo.hash(repo.localRef(branch)),
+      }],
+    });
+    await completeOperation(repo, plan.operationId);
+    return { operationId: plan.operationId, branch, pending: false, conflicts: [] };
   });
-  await completeOperation(repo, plan.operationId);
-  return { operationId: plan.operationId, branch, pending: false, conflicts: [] };
 }
 
 async function pendingReceipt(repo: GitRepository): Promise<OperationReceipt> {

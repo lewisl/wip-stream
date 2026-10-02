@@ -1,10 +1,8 @@
 const assert = require("assert/strict");
-const { execFileSync } = require("child_process");
-const { mkdtempSync, rmSync, writeFileSync } = require("fs");
-const os = require("os");
+const { writeFileSync } = require("fs");
 const path = require("path");
+const { git, commitFile, withFixture: sharedFixture } = require("./setup-fixture");
 
-const { GitRepository } = require("../out/git");
 const { commitAndSave, initializeRepository } = require("../out/generalized-workflow");
 const {
   LifecycleWorkflowError,
@@ -15,45 +13,8 @@ const {
 } = require("../out/lifecycle-workflow");
 const { readOperationReceipt, recoveryRef } = require("../out/operations");
 
-function git(cwd, args) {
-  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
-
-function configureIdentity(directory) {
-  git(directory, ["config", "user.name", "WipStream Lifecycle Test"]);
-  git(directory, ["config", "user.email", "wipstream-lifecycle@example.invalid"]);
-}
-
-function createFixture(prefix) {
-  const root = mkdtempSync(path.join(os.tmpdir(), prefix));
-  const remote = path.join(root, "remote.git");
-  const seed = path.join(root, "seed");
-  git(root, ["init", "--bare", remote]);
-  git(root, ["init", seed]);
-  configureIdentity(seed);
-  writeFileSync(path.join(seed, "main.txt"), "main baseline\n");
-  git(seed, ["add", "main.txt"]);
-  git(seed, ["commit", "-m", "Initial commit"]);
-  git(seed, ["branch", "-M", "main"]);
-  git(seed, ["remote", "add", "origin", remote]);
-  git(seed, ["push", "-u", "origin", "main"]);
-  git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
-  return { root, remote, seed };
-}
-
 async function withFixture(prefix, action) {
-  const fixture = createFixture(prefix);
-  try {
-    await action(fixture);
-  } finally {
-    rmSync(fixture.root, { recursive: true, force: true });
-  }
-}
-
-function commitFile(directory, name, contents, message) {
-  writeFileSync(path.join(directory, name), contents);
-  git(directory, ["add", "--all"]);
-  git(directory, ["commit", "-m", message]);
+  return sharedFixture(action, { prefix, initialContents: "main baseline\n" });
 }
 
 function publishBranch(seed, branch, startPoint = "main") {
@@ -64,10 +25,7 @@ function publishBranch(seed, branch, startPoint = "main") {
 }
 
 async function cloneRepository(fixture, name) {
-  const directory = path.join(fixture.root, name);
-  git(fixture.root, ["clone", fixture.remote, directory]);
-  configureIdentity(directory);
-  const repo = await GitRepository.open(directory);
+  const { directory, repo } = await fixture.clone(name);
   await initializeRepository(repo);
   return { directory, repo };
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { link, mkdir, open, readdir, readFile, rename, unlink } from "fs/promises";
 import * as path from "path";
-import { fail, WipStreamError } from "./errors";
+import { errorCode, fail, WipStreamError } from "./errors";
 import { GitRefUpdate, GitRemoteRefUpdate, GitRepository } from "./git";
 
 export type DestructiveEffectKind =
@@ -41,6 +41,17 @@ export interface ConfigurationTransition {
   readonly after: readonly string[];
 }
 
+export interface RemoteHeadTransition {
+  readonly remote: string;
+  readonly before: string | null;
+  readonly after: string | null;
+}
+
+export interface CheckpointRestoration {
+  readonly before: string;
+  readonly after: string;
+}
+
 export interface OperationOutcome {
   readonly additionalLocalRefUpdates: readonly GitRefUpdate[];
   readonly completedLocalRefs?: readonly { readonly ref: string; readonly objectId: string }[];
@@ -63,6 +74,8 @@ export interface OperationPlan {
   readonly localRefUpdates: readonly GitRefUpdate[];
   readonly remoteRefUpdates: readonly GitRemoteRefUpdate[];
   readonly checkpoint?: Readonly<CheckpointTransition>;
+  readonly checkpointRestoration?: Readonly<CheckpointRestoration>;
+  readonly remoteHead?: Readonly<RemoteHeadTransition>;
   readonly remoteAdoption?: Readonly<RemoteAdoption>;
   readonly configurationChanges: readonly Readonly<ConfigurationTransition>[];
   readonly checkout: Readonly<CheckoutTransition>;
@@ -76,6 +89,8 @@ export interface OperationPlanInput {
   readonly localRefUpdates?: readonly GitRefUpdate[];
   readonly remoteRefUpdates?: readonly GitRemoteRefUpdate[];
   readonly checkpoint?: CheckpointTransition;
+  readonly checkpointRestoration?: CheckpointRestoration;
+  readonly remoteHead?: RemoteHeadTransition;
   readonly remoteAdoption?: RemoteAdoption;
   readonly configurationChanges?: readonly ConfigurationTransition[];
   readonly checkout?: CheckoutTransition;
@@ -90,6 +105,7 @@ export type MutationBoundary =
   | "configuration"
   | "file-replacement"
   | "remote-head"
+  | "checkpoint-restoration"
   | "merge";
 export type TerminalOperationPhase = "completed" | "aborted" | "undone" | "recovered";
 export type OperationPhase = "planned" | `before-${MutationBoundary}` | `after-${MutationBoundary}` | TerminalOperationPhase;
@@ -131,12 +147,6 @@ export interface OperationReceipt {
 
 export { WipStreamError as OperationError };
 
-function errorCode(error: unknown): string | undefined {
-  return typeof error === "object" && error !== null && "code" in error
-    ? String((error as { code?: unknown }).code)
-    : undefined;
-}
-
 function validOperationId(operationId: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(operationId);
 }
@@ -161,6 +171,8 @@ export function createOperationPlan(input: OperationPlanInput): OperationPlan {
     localRefUpdates: immutableEntries(input.localRefUpdates),
     remoteRefUpdates: immutableEntries(input.remoteRefUpdates),
     ...(input.checkpoint ? { checkpoint: Object.freeze({ ...input.checkpoint }) } : {}),
+    ...(input.checkpointRestoration ? { checkpointRestoration: Object.freeze({ ...input.checkpointRestoration }) } : {}),
+    ...(input.remoteHead ? { remoteHead: Object.freeze({ ...input.remoteHead }) } : {}),
     ...(input.remoteAdoption ? { remoteAdoption: Object.freeze({
       ...input.remoteAdoption,
       fetchedTips: immutableEntries(input.remoteAdoption.fetchedTips),
@@ -212,6 +224,13 @@ export function renderOperationPreview(plan: OperationPlan): string {
       `Message: ${plan.checkpoint.message}`
     );
   }
+  if (plan.checkpointRestoration) {
+    lines.push(`Restore checkpoint files: ${plan.checkpointRestoration.before} → ${plan.checkpointRestoration.after}`);
+    lines.push("An interrupted restoration retains the checkpoint in recovery history. Recover keeps current files; it does not replay the patch.");
+  }
+  if (plan.remoteHead) {
+    lines.push(`Remote default cache (${plan.remoteHead.remote}): ${plan.remoteHead.before ?? "absent"} → ${plan.remoteHead.after ?? "absent"}`);
+  }
   if (plan.checkout.before || plan.checkout.after) {
     lines.push(`Checkout: ${plan.checkout.before ?? "detached"} → ${plan.checkout.after ?? "detached"}`);
   }
@@ -259,6 +278,44 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isObjectIdOrNull(value: unknown): value is string | null {
   return value === null || typeof value === "string";
+}
+
+function isFullRefName(value: unknown): value is string {
+  // Git's check-ref-format rules, applied without launching a process for
+  // every ref in every receipt read.
+  if (typeof value !== "string"
+    || !value.startsWith("refs/")
+    || value.endsWith(".")
+    || value.includes("..")
+    || value.includes("@{")
+    || /[\x00-\x20\x7f~^:?*\[\\]/.test(value)) {
+    return false;
+  }
+  return value.split("/").every(component => component.length > 0
+    && !component.startsWith(".") && !component.endsWith(".lock"));
+}
+
+function isFullObjectIdOrNull(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value));
+}
+
+function normalizeLocalRefUpdates(value: unknown): readonly GitRefUpdate[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const normalized: GitRefUpdate[] = [];
+  const seen = new Set<string>();
+  for (const update of value) {
+    if (!isObject(update)
+      || !isFullRefName(update.ref)
+      || seen.has(update.ref)
+      || !isFullObjectIdOrNull(update.expectedOld)
+      || !isFullObjectIdOrNull(update.proposed)
+      || (update.expectedOld === null && update.proposed === null)) {
+      return undefined;
+    }
+    seen.add(update.ref);
+    normalized.push({ ref: update.ref, expectedOld: update.expectedOld, proposed: update.proposed });
+  }
+  return normalized;
 }
 
 function normalizeRemoteRefUpdates(plan: Record<string, unknown>): readonly GitRemoteRefUpdate[] | undefined {
@@ -329,19 +386,29 @@ function normalizeOperationPlan(value: unknown): OperationPlan | undefined {
     || (value.checkpoint !== undefined && !isObject(value.checkpoint))) {
     return undefined;
   }
+  const localRefUpdates = normalizeLocalRefUpdates(value.localRefUpdates);
   const remoteRefUpdates = normalizeRemoteRefUpdates(value);
-  if (!remoteRefUpdates) {
+  if (!localRefUpdates || !remoteRefUpdates) {
     return undefined;
   }
   if (value.remoteAdoption !== undefined && !validRemoteAdoption(value.remoteAdoption)) return undefined;
+  if (value.checkpointRestoration !== undefined && (!isObject(value.checkpointRestoration)
+    || typeof value.checkpointRestoration.before !== "string"
+    || typeof value.checkpointRestoration.after !== "string")) return undefined;
+  if (value.remoteHead !== undefined && (!isObject(value.remoteHead)
+    || typeof value.remoteHead.remote !== "string"
+    || !(value.remoteHead.before === null || typeof value.remoteHead.before === "string")
+    || !(value.remoteHead.after === null || typeof value.remoteHead.after === "string"))) return undefined;
   try {
     return createOperationPlan({
       operationId: value.operationId,
       command: value.command,
       createdAt: value.createdAt,
-      localRefUpdates: value.localRefUpdates as unknown as readonly GitRefUpdate[],
+      localRefUpdates,
       remoteRefUpdates,
       checkpoint: value.checkpoint as unknown as CheckpointTransition | undefined,
+      checkpointRestoration: value.checkpointRestoration as unknown as CheckpointRestoration | undefined,
+      remoteHead: value.remoteHead as unknown as RemoteHeadTransition | undefined,
       remoteAdoption: value.remoteAdoption as unknown as RemoteAdoption | undefined,
       configurationChanges: value.configurationChanges as unknown as readonly ConfigurationTransition[],
       checkout: value.checkout as unknown as CheckoutTransition,
@@ -373,7 +440,14 @@ function normalizeOperationReceipt(value: unknown): OperationReceipt | undefined
   if (!plan) {
     return undefined;
   }
-  return Object.freeze({ ...value, plan }) as unknown as OperationReceipt;
+  let outcome;
+  if (value.outcome !== undefined) {
+    if (!isObject(value.outcome)) return undefined;
+    const updates = normalizeLocalRefUpdates(value.outcome.additionalLocalRefUpdates);
+    if (!updates) return undefined;
+    outcome = Object.freeze({ ...value.outcome, additionalLocalRefUpdates: immutableEntries(updates) });
+  }
+  return Object.freeze({ ...value, plan, ...(outcome ? { outcome } : {}) }) as unknown as OperationReceipt;
 }
 
 async function writeReceipt(receiptPath: string, receipt: OperationReceipt, createOnly: boolean): Promise<void> {
@@ -535,6 +609,38 @@ export async function abortOperation(repo: GitRepository, operationId: string): 
   return updated;
 }
 
+/** Close a refusal in this command only; no mutation boundary was entered. */
+export async function withRecordedOperation<T>(
+  repo: GitRepository,
+  plan: OperationPlan,
+  action: () => Promise<T>
+): Promise<T> {
+  await beginOperation(repo, plan);
+  try {
+    return await action();
+  } finally {
+    const receipt = await readOperationReceipt(repo, plan.operationId);
+    if (receipt.status === "planned" && receipt.phase === "planned") {
+      await abortUnstartedOperation(repo, plan.operationId);
+    }
+  }
+}
+
+export async function abortUnstartedOperation(repo: GitRepository, operationId: string): Promise<void> {
+  const receipt = await readOperationReceipt(repo, operationId);
+  if (receipt.status !== "planned" || receipt.phase !== "planned" || receipt.events.length !== 1) {
+    return fail("OPERATION_ALREADY_STARTED", "An operation that entered a mutation boundary requires recovery.");
+  }
+  const recordedAt = new Date().toISOString();
+  await writeReceipt(await operationReceiptPath(repo, operationId), {
+    ...receipt,
+    phase: "aborted",
+    status: "aborted",
+    completedAt: recordedAt,
+    events: [...receipt.events, { phase: "aborted", recordedAt }],
+  }, false);
+}
+
 /** Record recovery without making the interrupted attempt eligible for Undo.
  * The caller holds the repository command lock; no refs or working files move.
  */
@@ -590,6 +696,17 @@ export async function withMutationBoundary<T>(
 
 export async function applyLocalRefTransaction(repo: GitRepository, plan: OperationPlan): Promise<void> {
   await withMutationBoundary(repo, plan.operationId, "local-refs", () => repo.updateRefs(localTransactionUpdates(plan)));
+}
+
+export async function applyRemoteHeadTransition(repo: GitRepository, plan: OperationPlan): Promise<void> {
+  if (!plan.remoteHead) return;
+  const { remote, before, after } = plan.remoteHead;
+  await withMutationBoundary(repo, plan.operationId, "remote-head", async () => {
+    await repo.replaceRemoteTrackingHead(remote, before, after);
+    if ((await repo.symbolicRef(`refs/remotes/${remote}/HEAD`) ?? null) !== after) {
+      return fail("REMOTE_HEAD_VERIFICATION_FAILED", "The remote default ref did not match its recorded target.");
+    }
+  });
 }
 
 export async function listOperationReceipts(repo: GitRepository): Promise<readonly OperationReceipt[]> {

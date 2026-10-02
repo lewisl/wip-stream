@@ -9,16 +9,19 @@ import {
   resolveRemoteTrackingDefaultBranch,
   snapshotRemoteTrackingTips,
 } from "./repository-model";
-import { requireRepositoryPreflight, withRepositoryCommandLock } from "./repository-safety";
+import { requireRepositoryPreflight, withRepositoryWorkflow } from "./repository-safety";
 import {
   applyLocalRefTransaction,
-  beginOperation,
+  applyRemoteHeadTransition,
+  withRecordedOperation,
   CheckpointTransition,
   ConfigurationTransition,
+  RemoteHeadTransition,
   OperationPlan,
   completeOperation,
   createOperationPlan,
   inspectIncompleteOperations,
+  readOperationReceipt,
   recoveryRef,
   withMutationBoundary,
 } from "./operations";
@@ -112,8 +115,10 @@ export interface ApplyReconciliationOptions {
   readonly checkpoint?: CheckpointTransition;
   readonly hooks?: Pick<CommitAndSaveHooks, "beforeRemotePush" | "afterRemotePush"> & {
     readonly beforeLocalMutation?: () => Promise<void>;
+    readonly onOperationStarted?: (operationId: string) => void;
   };
   readonly configurationChanges?: readonly ConfigurationTransition[];
+  readonly remoteHead?: RemoteHeadTransition;
 }
 
 interface ReconciliationPlan {
@@ -196,7 +201,7 @@ function initializeUnsafeBranches(inventory: readonly BranchInventoryEntry[]): r
     if (branch.relation === "diverged") {
       return [{ name: branch.name, relation: branch.relation, reason: "local and remote history diverged" }];
     }
-    if (branch.relation === "remotely-deleted" && branch.localTip !== branch.previousRemoteTip) {
+    if (branch.relation === "remotely-deleted" && branch.localTip && branch.localTip !== branch.previousRemoteTip) {
       return [{
         name: branch.name,
         relation: branch.relation,
@@ -265,8 +270,21 @@ export async function initializationConfigurationChanges(
   ];
 }
 
-async function requireUnchangedInitializeCheckout(
+export async function initializationRemoteHead(
   repo: GitRepository,
+  remote: string,
+  branch: string
+): Promise<RemoteHeadTransition> {
+  return {
+    remote,
+    before: await repo.symbolicRef(`refs/remotes/${remote}/HEAD`) ?? null,
+    after: repo.remoteTrackingRef(remote, branch),
+  };
+}
+
+async function requireUnchangedReconciliationCheckout(
+  repo: GitRepository,
+  command: string,
   expectedBranch: string,
   expectedTips: ReadonlyMap<string, string>
 ): Promise<void> {
@@ -276,8 +294,8 @@ async function requireUnchangedInitializeCheckout(
     || (await repo.statusPorcelain()).trim()
   ) {
     fail(
-      "LOCAL_STATE_CHANGED_DURING_INITIALIZE",
-      "The checkout, local branches, or working tree changed after Initialize Repository classified them. Inspect the incomplete operation before retrying."
+      "LOCAL_STATE_CHANGED_DURING_RECONCILIATION",
+      `The checkout, local branches, or working tree changed after ${command} classified them. Inspect any incomplete operation before retrying.`
     );
   }
 }
@@ -364,6 +382,7 @@ function buildReconciliationPlan(repo: GitRepository, options: ApplyReconciliati
     remoteRefUpdates: publishUpdates,
     checkpoint,
     configurationChanges: options.configurationChanges,
+    remoteHead: options.remoteHead,
     checkout: { before: currentBranch, after: targetCheckout },
     destructiveEffects: [
       ...deleted.map((branch) => ({
@@ -404,10 +423,10 @@ async function verifyReconciliationInputs(
   if (!mapsEqual(options.fetchedRemoteTips, await snapshotRemoteTrackingTips(repo, options.remote))) {
     return fail(
       "REMOTE_TRACKING_CHANGED",
-      `Remote-tracking refs changed after ${options.command} classified them. Inspect the incomplete operation and retry.`
+      `Remote-tracking refs changed after ${options.command} classified them. No recorded mutations began; review the current state and retry.`
     );
   }
-  await requireUnchangedInitializeCheckout(repo, options.currentBranch, reconciliation.classifiedLocalTips);
+  await requireUnchangedReconciliationCheckout(repo, options.command, options.currentBranch, reconciliation.classifiedLocalTips);
 }
 
 async function verifyPublishedRemoteTrackingTips(
@@ -424,7 +443,7 @@ async function verifyPublishedRemoteTrackingTips(
       `A remote branch changed while ${options.command} was publishing. The atomic publication succeeded, but local refs remain unchanged; inspect the incomplete operation and retry.`
     );
   }
-  await requireUnchangedInitializeCheckout(repo, options.currentBranch, reconciliation.classifiedLocalTips);
+  await requireUnchangedReconciliationCheckout(repo, options.command, options.currentBranch, reconciliation.classifiedLocalTips);
 }
 
 async function executeReconciliationPlan(
@@ -475,31 +494,38 @@ async function applyReconciliationConfiguration(repo: GitRepository, plan: Opera
   });
 }
 
+async function verifyReconciliationCheckout(repo: GitRepository, options: ApplyReconciliationOptions): Promise<void> {
+  await verifyBranchParity(repo, options.remote, options.command);
+  if (await repo.currentBranch() !== options.targetCheckout || (await repo.statusPorcelain()).trim()) {
+    return fail("RECONCILIATION_VERIFICATION_FAILED", `${options.command} did not finish with a clean checkout on “${options.targetCheckout}”. Inspect the incomplete operation before retrying.`);
+  }
+}
+
 export async function applyBidirectionalReconciliation(
   repo: GitRepository,
   options: ApplyReconciliationOptions
 ): Promise<AppliedReconciliationResult> {
   const reconciliation = buildReconciliationPlan(repo, options);
   const { operationPlan } = reconciliation;
-  await beginOperation(repo, operationPlan);
-  await verifyReconciliationInputs(repo, options, reconciliation);
-  await executeReconciliationPlan(repo, options, reconciliation);
-  await verifyBranchParity(repo, options.remote, options.command);
-  if (await repo.currentBranch() !== options.targetCheckout || (await repo.statusPorcelain()).trim()) {
-    return fail("RECONCILIATION_VERIFICATION_FAILED", `${options.command} did not finish with a clean checkout on “${options.targetCheckout}”. Inspect the incomplete operation before retrying.`);
-  }
-  await applyReconciliationConfiguration(repo, operationPlan);
-  await verifyBranchParity(repo, options.remote, options.command);
-  if (await repo.currentBranch() !== options.targetCheckout || (await repo.statusPorcelain()).trim()) {
-    return fail("RECONCILIATION_VERIFICATION_FAILED", `${options.command} did not finish with a clean checkout on “${options.targetCheckout}”. Inspect the incomplete operation before retrying.`);
-  }
-  for (const change of operationPlan.configurationChanges) {
-    if (JSON.stringify(await repo.getConfigValues(change.key)) !== JSON.stringify(change.after)) {
-      return fail("CONFIGURATION_VERIFICATION_FAILED", `${options.command} could not verify configuration “${change.key}”. Inspect the incomplete operation before retrying.`);
+  return withRecordedOperation(repo, operationPlan, async () => {
+    options.hooks?.onOperationStarted?.(operationPlan.operationId);
+    await verifyReconciliationInputs(repo, options, reconciliation);
+    await executeReconciliationPlan(repo, options, reconciliation);
+    await verifyReconciliationCheckout(repo, options);
+    await applyRemoteHeadTransition(repo, operationPlan);
+    await applyReconciliationConfiguration(repo, operationPlan);
+    await verifyReconciliationCheckout(repo, options);
+    for (const change of operationPlan.configurationChanges) {
+      if (JSON.stringify(await repo.getConfigValues(change.key)) !== JSON.stringify(change.after)) {
+        return fail("CONFIGURATION_VERIFICATION_FAILED", `${options.command} could not verify configuration “${change.key}”. Inspect the incomplete operation before retrying.`);
+      }
     }
-  }
-  await completeOperation(repo, operationPlan.operationId);
-  return { operationId: operationPlan.operationId, ...reconciliation.effects };
+    if (operationPlan.remoteHead && await repo.symbolicRef(`refs/remotes/${options.remote}/HEAD`) !== operationPlan.remoteHead.after) {
+      return fail("REMOTE_HEAD_VERIFICATION_FAILED", `${options.command} could not verify the remote default ref.`);
+    }
+    await completeOperation(repo, operationPlan.operationId);
+    return { operationId: operationPlan.operationId, ...reconciliation.effects };
+  });
 }
 
 export async function initializeRepository(
@@ -507,7 +533,7 @@ export async function initializeRepository(
   requestedRemote?: string,
   hooks: InitializeRepositoryHooks = {}
 ): Promise<InitializeRepositoryResult> {
-  return withRepositoryCommandLock(
+  return withRepositoryWorkflow(
     repo,
     "Initialize Repository",
     () => initializeRepositoryUnlocked(repo, requestedRemote, hooks)
@@ -545,7 +571,7 @@ async function initializeRepositoryUnlocked(
 
   const previousRemoteTips = await snapshotRemoteTrackingTips(repo, remote);
   await repo.fetchAllBranches(remote);
-  const remoteDefaultBranch = await resolveRemoteTrackingDefaultBranch(repo, remote);
+  const remoteDefaultBranch = await repo.readRemoteDefaultBranch(remote);
   const fetchedRemoteTips = await snapshotRemoteTrackingTips(repo, remote);
   const inventory = await inspectBranchInventory(repo, remote, previousRemoteTips);
   const unsafe = initializeUnsafeBranches(inventory);
@@ -566,15 +592,8 @@ async function initializeRepositoryUnlocked(
     ...fetchedRemoteTips.keys(),
     ...inventory.filter((branch) => branch.relation === "local-only").map((branch) => branch.name),
   ])].sort();
-  const configurationChanges: ConfigurationTransition[] = [
-    {
-      key: `remote.${remote}.fetch`,
-      before: await repo.getConfigValues(`remote.${remote}.fetch`),
-      after: [`+refs/heads/*:refs/remotes/${remote}/*`],
-    },
-    ...await trackingConfigurationChanges(repo, remote, synchronizedBranches),
-    { key: CONFIG_KEYS.remote, before: await repo.getConfigValues(CONFIG_KEYS.remote), after: [remote] },
-  ];
+  const configurationChanges = await initializationConfigurationChanges(repo, remote, synchronizedBranches);
+  const remoteHead = await initializationRemoteHead(repo, remote, remoteDefaultBranch);
   return applyBidirectionalReconciliation(repo, {
     command: "Initialize Repository",
     remote,
@@ -584,6 +603,7 @@ async function initializeRepositoryUnlocked(
     inventory,
     hooks,
     configurationChanges,
+    remoteHead,
   });
 }
 
@@ -632,7 +652,7 @@ export async function commitAndSave(
   repo: GitRepository,
   hooks: CommitAndSaveHooks = {}
 ): Promise<CommitAndSaveResult> {
-  return withRepositoryCommandLock(repo, "Commit and Save", () => commitAndSaveUnlocked(repo, hooks));
+  return withRepositoryWorkflow(repo, "Commit and Save", () => commitAndSaveUnlocked(repo, hooks));
 }
 
 async function commitAndSaveUnlocked(
@@ -728,6 +748,7 @@ async function commitAndSaveUnlocked(
     synchronizedBranches
   );
   let applied: AppliedReconciliationResult;
+  let operationId: string | undefined;
   try {
     applied = await applyBidirectionalReconciliation(repo, {
       command: "Commit and Save",
@@ -737,11 +758,17 @@ async function commitAndSaveUnlocked(
       fetchedRemoteTips,
       inventory,
       checkpoint,
-      hooks,
+      hooks: { ...hooks, onOperationStarted: id => { operationId = id; } },
       configurationChanges,
     });
   } catch (error) {
-    const incomplete = (await inspectIncompleteOperations(repo))[0];
+    const incomplete = (await inspectIncompleteOperations(repo)).find(receipt => receipt.plan.operationId === operationId);
+    const ownReceipt = operationId ? await readOperationReceipt(repo, operationId) : undefined;
+    if (ownReceipt?.status === "aborted") {
+      return unsuccessful("incomplete",
+        "Synchronization stopped before its recorded mutations began. Any checkpoint is retained locally; retry Commit and Save.",
+        { operationId: ownReceipt.plan.operationId });
+    }
     if (!incomplete) {
       throw error;
     }
@@ -797,7 +824,7 @@ async function commitAndSaveUnlocked(
 }
 
 export async function getFromRemote(repo: GitRepository): Promise<GetFromRemoteResult> {
-  return withRepositoryCommandLock(repo, "Get from Remote", () => getFromRemoteUnlocked(repo));
+  return withRepositoryWorkflow(repo, "Get from Remote", () => getFromRemoteUnlocked(repo));
 }
 
 async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemoteResult> {
@@ -834,6 +861,7 @@ async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemote
   const updates = localUpdates(inventory, repo);
   const targetCheckout = await checkoutAfterGet(repo, currentBranch, remoteDefaultBranch, inventory);
   const created = inventory.filter((branch) => branch.relation === "remote-only").map((branch) => branch.name);
+  const configurationChanges = await trackingConfigurationChanges(repo, configuration.remote, created);
   const fastForwarded = inventory.filter((branch) => branch.relation === "remote-ahead").map((branch) => branch.name);
   const deleted = inventory
     .filter((branch) => branch.relation === "remotely-deleted" && branch.localTip)
@@ -843,6 +871,7 @@ async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemote
   const plan = createOperationPlan({
     command: "Get from Remote",
     localRefUpdates: updates,
+    configurationChanges,
     checkout: { before: currentBranch, after: targetCheckout },
     destructiveEffects: [
       ...deleted.map((branch) => ({
@@ -857,53 +886,52 @@ async function getFromRemoteUnlocked(repo: GitRepository): Promise<GetFromRemote
       }] : []),
     ],
   });
-  await beginOperation(repo, plan);
+  return withRecordedOperation(repo, plan, async () => {
 
-  if (!mapsEqual(fetchedRemoteTips, await snapshotRemoteTrackingTips(repo, configuration.remote))) {
-    return fail(
-      "REMOTE_TRACKING_CHANGED",
-      "Remote-tracking refs changed after Get from Remote classified them. Inspect the incomplete operation and retry."
+    if (!mapsEqual(fetchedRemoteTips, await snapshotRemoteTrackingTips(repo, configuration.remote))) {
+      return fail(
+        "REMOTE_TRACKING_CHANGED",
+        "Remote-tracking refs changed after Get from Remote classified them. No recorded mutations began; review the current state and retry."
+      );
+    }
+    if (updates.length && (await repo.statusPorcelain()).trim()) {
+      return fail(
+        "WORKTREE_CHANGED_DURING_GET",
+        "The working tree changed after Get from Remote preflight. No recorded mutations began; review the current files and retry."
+      );
+    }
+
+    if (replaceCheckout) {
+      await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
+    }
+    if (updates.length) {
+      await applyLocalRefTransaction(repo, plan);
+    }
+    if (configurationChanges.length) {
+      await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
+        for (const change of configurationChanges) await repo.replaceConfigValues(change.key, change.after);
+      });
+    }
+    if (replaceCheckout) {
+      await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(targetCheckout));
+    }
+
+    await verifyBranchParity(repo, configuration.remote, "Get from Remote");
+    const currentInventory = await inspectBranchInventory(
+      repo,
+      configuration.remote,
+      await snapshotRemoteTrackingTips(repo, configuration.remote)
     );
-  }
-  if (updates.length && (await repo.statusPorcelain()).trim()) {
-    return fail(
-      "WORKTREE_CHANGED_DURING_GET",
-      "The working tree changed after Get from Remote preflight. Inspect the incomplete operation before retrying."
-    );
-  }
-
-  if (replaceCheckout) {
-    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.detach());
-  }
-  if (updates.length) {
-    await applyLocalRefTransaction(repo, plan);
-  }
-  if (created.length) {
-    await withMutationBoundary(repo, plan.operationId, "configuration", async () => {
-      for (const branch of created) {
-        await repo.configureTracking(branch, configuration.remote);
-      }
-    });
-  }
-  if (replaceCheckout) {
-    await withMutationBoundary(repo, plan.operationId, "checkout", () => repo.switch(targetCheckout));
-  }
-
-  await verifyBranchParity(repo, configuration.remote, "Get from Remote");
-  const currentInventory = await inspectBranchInventory(
-    repo,
-    configuration.remote,
-    await snapshotRemoteTrackingTips(repo, configuration.remote)
-  );
-  const advisories = await parentAdvisories(repo, remoteDefaultBranch, currentInventory);
-  await completeOperation(repo, plan.operationId);
-  return {
-    operationId: plan.operationId,
-    updated: updates.length > 0,
-    checkout: targetCheckout,
-    created,
-    fastForwarded,
-    deleted,
-    advisories,
-  };
+    const advisories = await parentAdvisories(repo, remoteDefaultBranch, currentInventory);
+    await completeOperation(repo, plan.operationId);
+    return {
+      operationId: plan.operationId,
+      updated: updates.length > 0,
+      checkout: targetCheckout,
+      created,
+      fastForwarded,
+      deleted,
+      advisories,
+    };
+  });
 }

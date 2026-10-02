@@ -23,15 +23,15 @@ function heads(directory) {
   return git(directory, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"]);
 }
 
-async function withFixture(action) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "wipstream-setup-"));
+async function withFixture(action, options = {}) {
+  const root = mkdtempSync(path.join(os.tmpdir(), options.prefix || "wipstream-setup-"));
   try {
     const remote = path.join(root, "remote.git");
     const seed = path.join(root, "seed");
     git(root, ["init", "--bare", remote]);
     git(root, ["init", "-b", "main", seed]);
     identity(seed);
-    commitFile(seed, "main.txt", "baseline\n", "Initial commit");
+    commitFile(seed, options.initialFile || "main.txt", options.initialContents || "baseline\n", "Initial commit");
     git(seed, ["remote", "add", "origin", remote]);
     git(seed, ["push", "-u", "origin", "main"]);
     git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);

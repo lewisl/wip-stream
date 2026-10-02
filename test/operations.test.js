@@ -287,17 +287,28 @@ async function runInterruptionContract() {
 }
 
 async function runRetentionContract() {
-  await withRepository("wipstream-operation-retention-", async (_directory, repo) => {
-    const incomplete = createOperationPlan({ operationId: "retain-incomplete", command: "Incomplete" });
+  await withRepository("wipstream-operation-retention-", async (directory, repo) => {
+    const tip = ref(directory, "main");
+    const updates = [{ ref: "refs/heads/main", expectedOld: tip, proposed: commitTree(directory, tip, "Interrupted transition") }];
+    const incomplete = createOperationPlan({ operationId: "retain-incomplete", command: "Incomplete", localRefUpdates: updates });
     await beginOperation(repo, incomplete);
+    await applyLocalRefTransaction(repo, incomplete);
     for (const operationId of ["completed-one", "completed-two", "completed-three"]) {
-      const plan = createOperationPlan({ operationId, command: operationId });
+      const before = ref(directory, "main");
+      const plan = createOperationPlan({ operationId, command: operationId, localRefUpdates: [{
+        ref: "refs/heads/main", expectedOld: before, proposed: commitTree(directory, before, operationId),
+      }] });
       await beginOperation(repo, plan);
+      await applyLocalRefTransaction(repo, plan);
       await completeOperation(repo, operationId, 2);
     }
     await pruneCompletedReceipts(repo, 2);
     const receipts = await listOperationReceipts(repo);
     assert.equal(receipts.filter(({ status }) => status === "completed").length, 2);
+    for (const receipt of receipts) {
+      assert.equal(ref(directory, recoveryRef(receipt.plan.operationId, 0)), receipt.plan.localRefUpdates[0].expectedOld,
+        "retained receipts and incomplete operations keep their recovery snapshots");
+    }
     assert.deepEqual(
       (await inspectIncompleteOperations(repo)).map(({ plan }) => plan.operationId),
       [incomplete.operationId],

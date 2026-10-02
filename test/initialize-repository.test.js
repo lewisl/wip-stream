@@ -7,11 +7,12 @@ const path = require("path");
 const { GitRepository } = require("../out/git");
 const { GeneralizedWorkflowError, initializeRepository } = require("../out/generalized-workflow");
 const {
-  completeOperation,
   inspectIncompleteOperations,
   listOperationReceipts,
   readOperationReceipt,
 } = require("../out/operations");
+const { recoverIncompleteOperation } = require("../out/recovery-workflow");
+const { repositoryState } = require("./fixture-state");
 const { readRepositoryConfiguration } = require("../out/repository-model");
 
 function git(cwd, args) {
@@ -177,7 +178,7 @@ async function runBidirectionalInitialization() {
     ]);
     assert.deepEqual(
       receipt.events.map(({ phase }) => phase).filter((phase) => phase.includes("remote-")),
-      ["before-remote-push", "after-remote-push", "before-remote-fetch", "after-remote-fetch"]
+      ["before-remote-push", "after-remote-push", "before-remote-fetch", "after-remote-fetch", "before-remote-head", "after-remote-head"]
     );
   });
 }
@@ -235,7 +236,11 @@ async function runRemoteSuccessLocalFailureRetry() {
     assert.equal(incomplete[0].phase, "after-remote-push");
     assert.equal(incomplete[0].plan.remoteRefUpdates[0].ref, "refs/heads/published-before-failure");
 
-    await completeOperation(clone.repo, incomplete[0].plan.operationId);
+    const beforeRecovery = await repositoryState(clone.repo, fixture.remote);
+    const recovered = await recoverIncompleteOperation(clone.repo, incomplete[0].plan.operationId);
+    assert.equal(recovered.status, "recovered");
+    assert.equal(recovered.recovery.resolution, "kept-current-state");
+    assert.deepEqual(await repositoryState(clone.repo, fixture.remote), beforeRecovery);
     const retry = await initializeRepository(clone.repo);
     assert.deepEqual(retry.published, [], "the successful remote publication is authoritative on retry");
     await assertInitializedParity(fixture, clone);

@@ -138,11 +138,12 @@ const setupWorkflow = {
 const originalLoad = Module._load;
 Module._load = function(request, parent, isMain) {
   if (request === "vscode") return vscode;
-  if (parent?.filename.endsWith("/out/setup-ui.js")) {
+  if (parent?.filename === path.resolve(__dirname, "../out/setup-ui.js")) {
     if (request === "./commands") return commandHelpers;
     if (request === "./setup-workflow") return setupWorkflow;
   }
-  if (parent?.filename.endsWith("/out/registered-commands.js")) {
+  if (parent?.filename === path.resolve(__dirname, "../out/registered-commands.js")) {
+    if (request === "./repository-safety") return { recoverStaleCommandLock: async () => false };
     if (request === "./commands") return commandHelpers;
     if (request === "./repository-model") return { readRepositoryConfiguration: async () => scenario.configuration };
     if (request === "./operations") return {

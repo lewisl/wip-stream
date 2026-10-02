@@ -1,7 +1,7 @@
 const assert = require("assert/strict");
 const { execFileSync } = require("child_process");
 const { hostname } = require("os");
-const { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } = require("fs");
+const { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } = require("fs");
 const os = require("os");
 const path = require("path");
 
@@ -111,10 +111,17 @@ async function runLinkedWorktreeRefusals() {
     await initializeRepository(first.repo);
     const linkedOne = path.join(fixture.root, "linked-one");
     const linkedTwo = path.join(fixture.root, "linked-two");
-    git(first.directory, ["worktree", "add", "-b", "linked-one", linkedOne, "main"]);
-    git(first.directory, ["worktree", "add", "-b", "linked-two", linkedTwo, "main"]);
+    mkdirSync(linkedOne);
+    mkdirSync(linkedTwo);
+    const primary = await first.repo.worktrees();
+    const head = await first.repo.hash("HEAD");
+    first.repo.worktrees = async () => [
+      ...primary,
+      { path: linkedOne, head, branch: "linked-one", detached: false, bare: false },
+      { path: linkedTwo, head, branch: "linked-two", detached: false, bare: false },
+    ];
     writeFileSync(path.join(linkedOne, "dirty.txt"), "must remain untouched\n");
-    const dirtyBefore = git(linkedOne, ["status", "--porcelain=v1"]);
+    const before = git(first.directory, ["status", "--porcelain=v1"]);
 
     const error = await expectSafetyError(() => getFromRemote(first.repo), GitWorktreeError, "ADDITIONAL_WORKTREES");
     assert.deepEqual(
@@ -127,7 +134,7 @@ async function runLinkedWorktreeRefusals() {
       assert.match(error.message, new RegExp(worktree.branch));
     }
     assert.equal(readFileSync(path.join(linkedOne, "dirty.txt"), "utf8"), "must remain untouched\n");
-    assert.equal(git(linkedOne, ["status", "--porcelain=v1"]), dirtyBefore, "refusal does not inspect or modify dirty files");
+    assert.equal(git(first.directory, ["status", "--porcelain=v1"]), before, "refusal does not modify the checkout");
   });
 }
 
@@ -138,11 +145,13 @@ async function runFinalPreMutationRecheck() {
     writeFileSync(path.join(first.directory, "pending.txt"), "not staged or committed\n");
     const before = git(first.directory, ["rev-parse", "HEAD"]);
     const injected = path.join(fixture.root, "injected");
+    const primary = await first.repo.worktrees();
 
     await expectSafetyError(
       () => commitAndSave(first.repo, {
         requestCheckpointMessage: async () => {
-          git(first.directory, ["worktree", "add", "-b", "injected", injected, "main"]);
+          first.repo.worktrees = async () => [...primary,
+            { path: injected, head: before, branch: "injected", detached: false, bare: false }];
           return "Must not commit";
         },
       }),

@@ -9,7 +9,7 @@ const { git, commitFile, heads, withFixture } = require("./setup-fixture");
 
 const discard = { kind: "remote", backup: { kind: "discard", confirmed: true } };
 function forbidPublishingAndCommitting(repo) {
-  for (const method of ["pushRefsAtomic", "pushAtomic", "verifyAtomicPushSupport", "commit", "createCommitFromTree", "merge"]) {
+  for (const method of ["pushRefsAtomic", "verifyAtomicPushSupport", "commit", "createCommitFromTree", "merge"]) {
     repo[method] = async () => { throw new Error(`Remote adoption must never call ${method}`); };
   }
 }
